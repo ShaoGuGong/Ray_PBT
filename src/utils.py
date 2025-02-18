@@ -1,11 +1,11 @@
 import os
-from dataclasses import dataclass
 from enum import Enum, auto
 
-import torch
+import torch.nn as nn
 import torchvision
+import torchvision.models as models
 import torchvision.transforms as transforms
-import numpy
+from torch.utils.data import DataLoader
 
 # ╭──────────────────────────────────────────────────────────╮
 # │                          Enums                           │
@@ -17,33 +17,15 @@ class ModelType(Enum):
     RESNET_50 = auto()
 
 
-# ╭──────────────────────────────────────────────────────────╮
-# │                       Dataclasses                        │
-# ╰──────────────────────────────────────────────────────────╯
-
-
-@dataclass
-class Hyperparameter:
-    lr: float
-    momentum: float
-    batch_size: int
-    model_type: ModelType
-
-
-@dataclass
-class Checkpoint:
-    model_state_dict: dict
-    optimzer_state_dict: dict
-    checkpoint_interval: int
+class TrialStatus(Enum):
+    RUNNING = auto()
+    PENDING = auto()
+    TERMINAL = auto()
 
 
 # ╭──────────────────────────────────────────────────────────╮
 # │                        Functions                         │
 # ╰──────────────────────────────────────────────────────────╯
-
-
-def fetch_nodes_resources():
-    raise NotImplementedError
 
 
 def get_data_loader(
@@ -61,14 +43,14 @@ def get_data_loader(
         )
 
     if model_type == ModelType.RESNET_18:
-        train_loader = torch.utils.data.DataLoader(
+        train_loader = DataLoader(
             torchvision.datasets.CIFAR10(
                 root=data_dir, train=True, download=True, transform=transform
             ),
             batch_size=batch_size,
             shuffle=True,
         )
-        test_loader = torch.utils.data.DataLoader(
+        test_loader = DataLoader(
             torchvision.datasets.CIFAR10(
                 root=data_dir, train=False, download=True, transform=transform
             ),
@@ -78,7 +60,7 @@ def get_data_loader(
         return train_loader, test_loader
 
     elif model_type == ModelType.RESNET_50:
-        train_loader = torch.utils.data.DataLoader(
+        train_loader = DataLoader(
             torchvision.datasets.CIFAR100(
                 root=data_dir, train=True, download=True, transform=transform
             ),
@@ -86,14 +68,25 @@ def get_data_loader(
             shuffle=True,
         )
 
-        test_loader = torch.utils.data.DataLoader(
+        test_loader = DataLoader(
             torchvision.datasets.CIFAR100(
                 root=data_dir, train=False, download=True, transform=transform
             ),
             batch_size=batch_size,
             shuffle=False,
         )
-
         return train_loader, test_loader
 
     raise ValueError("`model_type` must be in ModelType")
+
+
+def get_model(model_type: ModelType):
+    if model_type == ModelType.RESNET_18:
+        model = models.resnet18()
+        model.fc = nn.Linear(model.fc.in_features, 10)
+        return model
+
+    elif model_type == ModelType.RESNET_50:
+        model = models.resnet50()
+        model.fc = nn.Linear(model.fc.in_features, 100)
+        return model

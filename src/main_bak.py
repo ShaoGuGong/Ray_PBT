@@ -1,32 +1,19 @@
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import torch.nn.functional as F
-from torch.utils.data import random_split
-
-import torchvision
-import torchvision.transforms as transforms
-import torchvision.models as models
-
-import ray
-from ray import tune
-from ray.util.placement_group import (
-    placement_group,
-    placement_group_table,
-    remove_placement_group,
-)
-from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-
-from numpy import random
-import time
+import argparse
 import copy
-import os
 import heapq
 import json
 import math
-import matplotlib.pyplot as plt
-import argparse
+import os
+import time
 
+import ray
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torchvision
+import torchvision.models as models
+import torchvision.transforms as transforms
+from numpy import random
 
 HEAD_NODE_IP = "192.168.50.35"  # Head node IP
 HYPER_NUM = 20  # Number of hyperparameters
@@ -425,9 +412,9 @@ class Tuner(object):
                                 - self.trials_state[ids[i]]["iteration"]
                             )
                         else:
-                            self.checkpoints[ids[i]]["checkpoint_interval"] = (
-                                self.checkpoint_interval
-                            )
+                            self.checkpoints[ids[i]][
+                                "checkpoint_interval"
+                            ] = self.checkpoint_interval
                         hypers.append(self.hypers[ids[i]])
                         checkpoints.append(self.checkpoints[ids[i]])
 
@@ -748,7 +735,9 @@ def Trial(tuner, n, ids, hypers, checkpoints):
         checkpoints[i]["model_state_dict"] = model.state_dict()
         checkpoints[i]["optimizer_state_dict"] = optimizer.state_dict()
 
-        if torch.cuda.is_available():  # If using GPU, move model and optimizer to CPU because checkpoints are on CPU
+        if (
+            torch.cuda.is_available()
+        ):  # If using GPU, move model and optimizer to CPU because checkpoints are on CPU
             # Convert to CPU
             for k, v in checkpoints[i]["model_state_dict"].items():
                 checkpoints[i]["model_state_dict"][k] = v.cpu()
