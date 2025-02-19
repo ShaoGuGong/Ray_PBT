@@ -1,9 +1,11 @@
 from dataclasses import dataclass
+from typing import Optional
 
 import ray
 import torch.optim as optim
 
 from utils import ModelType, TrialStatus, get_model
+from worker import Worker
 
 
 @dataclass
@@ -62,5 +64,37 @@ class Trial:
     def __init__(self, trial_state: TrialState) -> None:
         self.state = trial_state
 
-    def run(self) -> None:
-        pass
+
+class TrialRunner:
+    def __init__(self, trial_states: list[TrialState], max_iteration: int) -> None:
+        self.trial_states = trial_states
+        self.max_iteration = max_iteration
+
+    def get_remaining_generation(self) -> int:
+        result = 0
+        for trial_state in filter(
+            lambda trial_state: trial_state.status != TrialStatus.TERMINAL,
+            self.trial_states,
+        ):
+            result += self.max_iteration - trial_state.iteration
+
+        return result
+
+
+class TrialScheduler:
+    def __init__(self, resources: list[Worker], stop_interval: int) -> None:
+        self.available_resources = resources
+        self.used_resources = []
+        self.stop_interval = stop_interval
+
+    def assign_trail_to_worker(
+        self, trial: TrialState, remaining_generation
+    ) -> Optional[Trial]:
+        if len(self.available_resources) == 0:
+            return None
+
+        resource = self.available_resources.pop(0)
+
+        # TODO: Unfinished assign function
+
+        raise NotImplementedError
