@@ -4,9 +4,9 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
 import ray
-
-from worker import fetch_nodes_resources
+from pprint import pp
+from worker import generate_all_workers
 
 ray.init()
 if __name__ == "__main__":
-    fetch_nodes_resources()
+    pp(generate_all_workers())
