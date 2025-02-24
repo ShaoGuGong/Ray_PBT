@@ -15,8 +15,6 @@ class Tuner:
         self.trial_states = self._generate_trail_states()
         self.max_iteration = 1000
 
-        pass
-
     def run() -> None:
         pass
 

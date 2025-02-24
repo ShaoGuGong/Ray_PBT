@@ -1,0 +1,22 @@
+
+head_node_ip = "192.168.50.35" # head node ip
+hyper_num = 20                 # number of hyperparameters
+batch_size = 512               # batch size for one training iteration
+stop_iter = 1000               # total number of training iterations
+stop_acc = 0.8                 # stop training when accuracy reaches this value
+interval_report = 300          # interval for displaying progress in the terminal (in seconds)
+interval_check = 50
+
+[resource_allocation]
+[[resource_allocation.cpu]]
+"192.168.50.34" = 16
+"192.168.50.35" = 12
+"192.168.50.36" = 4
+"192.168.50.37" = 4
+"192.168.50.38" = 4
+"192.168.50.8" = 20
+"192.168.50.19" = 12
+"192.168.50.88" = 12
+
+[[resource_allocation.gpu]]
+"192.168.50.35" = 1

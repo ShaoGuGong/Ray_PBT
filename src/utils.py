@@ -1,5 +1,7 @@
 import os
 from enum import Enum, auto
+from functools import reduce
+from typing import Callable, TypeVar
 
 import torch.nn as nn
 import torchvision
@@ -21,11 +23,29 @@ class TrialStatus(Enum):
     RUNNING = auto()
     PENDING = auto()
     TERMINAL = auto()
+    PAUSE = auto()
 
 
 # ╭──────────────────────────────────────────────────────────╮
 # │                        Functions                         │
 # ╰──────────────────────────────────────────────────────────╯
+
+T = TypeVar("T")
+Composeable = Callable[[T], T]
+
+
+def compose(*functions: Composeable) -> Composeable:
+    def apply(value: T, fn: Composeable[T]) -> T:
+        return fn(value)
+
+    return lambda data: reduce(apply, functions[::-1], data)
+
+
+def pipe(*functions: Composeable) -> Composeable:
+    def apply(value: T, fn: Composeable[T]) -> T:
+        return fn(value)
+
+    return lambda data: reduce(apply, functions, data)
 
 
 def get_data_loader(
