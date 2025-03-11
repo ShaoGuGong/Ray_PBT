@@ -10,11 +10,11 @@ from ray.actor import ActorHandle
 
 from utils import ModelType, TrialStatus, get_model
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s,%(msecs)03d %(levelname)s %(filename)s:%(lineno)d -- %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+# logging.basicConfig(
+#     level=logging.INFO,
+#     format="%(asctime)s,%(msecs)03d %(levelname)s %(filename)s:%(lineno)d -- %(message)s",
+#     datefmt="%Y-%m-%d %H:%M:%S",
+# )
 
 
 @dataclass
@@ -37,7 +37,7 @@ class TrialState:
         self,
         id: int,
         hyperparameter: Hyperparameter,
-        stop_iteration: int = 1000,
+        stop_iteration: int = 10,
     ) -> None:
         self.id = id
         self.hyperparameter = hyperparameter
@@ -60,7 +60,7 @@ class TrialState:
             0,
         )
         self.accuracy = 0.0
-        self.stop_accuracy = 0.0
+        self.stop_accuracy = 0.5
 
     def update_checkpoint(self, model, optimizer, iteration: int) -> None:
         self.checkpoint.model_state_dict = model.state_dict()

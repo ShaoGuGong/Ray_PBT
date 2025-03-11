@@ -3,7 +3,9 @@ from enum import Enum, auto
 from functools import reduce
 from typing import Callable, TypeVar
 
+
 import torch.nn as nn
+from torch.utils import data
 import torchvision
 import torchvision.models as models
 import torchvision.transforms as transforms
@@ -49,8 +51,12 @@ def pipe(*functions: Composeable) -> Composeable:
 
 
 def get_data_loader(
-    model_type: ModelType, batch_size: int = 64, transform=None, data_dir="../dataset/"
+    model_type: ModelType,
+    batch_size: int = 64,
+    transform=None,
+    data_dir="~/Documents/dataset/",
 ) -> tuple:
+    data_dir = os.path.expanduser(data_dir)
     if not os.path.exists(data_dir):
         os.makedirs(data_dir)
 
