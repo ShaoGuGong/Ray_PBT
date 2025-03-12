@@ -1,24 +1,25 @@
 import logging
 import os
 from dataclasses import dataclass
-from typing import Protocol, List, Any
+from typing import Any, Dict, List, Protocol
 
 import ray
-from ray.actor import ActorHandle
 import torch
 import torch.optim as optim
-
+from ray.actor import ActorHandle
 
 from trial import TrialState
 from utils import TrialStatus, get_data_loader, get_model
-
 
 # Type Define
 Accuracy = float
 
 
-import logging
-import os
+class WorkerLoggerFormatter(logging.Formatter):
+    def format(self, record):
+        record.worker_id = getattr(record, "worker_id", "N/A")
+        record.trial_id = getattr(record, "trial_id", "N/A")
+        return super().format(record)
 
 
 def get_worker_logger(worker_id: int) -> logging.Logger:
@@ -35,8 +36,9 @@ def get_worker_logger(worker_id: int) -> logging.Logger:
         logger.setLevel(logging.DEBUG)  # 或者選擇更合適的級別
 
         # 統一格式設定
-        formatter = logging.Formatter(
-            "%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s"
+        formatter = WorkerLoggerFormatter(
+            "[%(asctime)s] %(levelname)s WORKER_ID: %(worker_id)s TRIAL_ID: %(trial_id)s -- %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
         )
 
         # 設定 stream handler (只顯示在終端)
@@ -47,7 +49,7 @@ def get_worker_logger(worker_id: int) -> logging.Logger:
 
         # 設定 file handler (將日誌寫入文件)
         file_handler = logging.FileHandler(
-            os.path.join(log_dir, f"worker_{worker_id}.log")
+            os.path.join(log_dir, f"worker-{worker_id}.log")
         )
         file_handler.setLevel(logging.DEBUG)  # 記錄所有級別的日誌
         file_handler.setFormatter(formatter)
@@ -67,7 +69,7 @@ class WorkerState:
     num_gpus: int
     node_name: str
     calculate_ability: float = 0.0
-    max_trials: int = 3
+    max_trials: int = 1
 
 
 @ray.remote
@@ -80,6 +82,7 @@ class Worker:
         self.train_step = train_step
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.logger = get_worker_logger(worker_id=worker_state.id)
+        self.logger.info("初始化完成", extra={"worker_id": self.worker_state.id})
 
     def assign_trial(self, trial_state: TrialState) -> TrialState:
         self.active_trials[trial_state.id] = trial_state
@@ -90,13 +93,12 @@ class Worker:
         return len(self.active_trials)
 
     def has_available_slots(self) -> bool:
-        # print(f"目前有{len(self.active_trials)}個Trials")
         return len(self.active_trials) < self.worker_state.max_trials
 
     def train(self, trial_state: TrialState) -> TrialState:
-        # print(f"Worker {self.worker_state.id} 開始訓練 Trial {trial_state.id}")
         self.logger.info(
-            f"Worker {self.worker_state.id} 開始訓練 Trial {trial_state.id}"
+            f"開始訓練",
+            extra={"worker_id": self.worker_state.id, "trial_id": trial_state.id},
         )
 
         hyper = trial_state.hyperparameter
@@ -114,22 +116,31 @@ class Worker:
             param_group["momentum"] = hyper.momentum
 
         while True:
+            if trial_state.accuracy > trial_state.stop_accuracy:
+                break
+
+            if trial_state.iteration >= trial_state.stop_iteration:
+                break
+
             self.train_step(
                 model, optimizer, train_loader, hyper.batch_size, self.device
             )
-            accuracy = self.test(model, test_loader)
 
-            if accuracy > trial_state.stop_accuracy:
-                break
-            trial_state.iteration += 1
-            if trial_state.iteration > trial_state.stop_iteration:
-                break
+            trial_state.accuracy = self.test(model, test_loader)
 
             self.logger.info(
-                f"[Worker-{self.worker_state.id}/Trial-{trial_state.id}] Iteration:{trial_state.iteration} Accuracy:{accuracy}"
+                f"Iteration: {trial_state.iteration} Accuracy: {trial_state.accuracy}",
+                extra={"worker_id": self.worker_state.id, "trial_id": trial_state.id},
             )
 
+            trial_state.iteration += 1
+
+        self.logger.info(
+            f"訓練結束",
+            extra={"worker_id": self.worker_state.id, "trial_id": trial_state.id},
+        )
         self.finish_trial(trial_state)
+
         return trial_state
 
     def test(self, model, test_loader) -> Accuracy:
@@ -148,7 +159,23 @@ class Worker:
 
     def finish_trial(self, trial_state: TrialState) -> None:
         # trial_state.worker_id = -1
+        self.active_trials.pop(trial_state.id)
         trial_state.status = TrialStatus.TERMINAL
+
+    def get_log_file(self) -> Dict[str, int]:
+        log_dir = None
+
+        for handler in self.logger.handlers:
+            if isinstance(handler, logging.FileHandler):
+                log_dir = handler.baseFilename  # 取得資料夾路徑
+                break
+
+        if not log_dir:
+            self.logger.error("Logs direction is not exists")
+            return {"id": self.worker_state.id, "content": ""}
+
+        with open(log_dir, "r") as f:
+            return {"id": self.worker_state.id, "content": f.read()}
 
 
 def generate_all_workers(train_step: TrainStepFunction) -> List[ActorHandle]:
@@ -191,7 +218,7 @@ def generate_all_workers(train_step: TrainStepFunction) -> List[ActorHandle]:
     for index, worker_state in enumerate(worker_states):
         workers.append(
             Worker.options(
-                max_concurrency=worker_state.max_trials,
+                max_concurrency=worker_state.max_trials + 1,
                 name=f"worker-{index}",
                 num_cpus=worker_state.num_cpus,
                 num_gpus=worker_state.num_gpus,

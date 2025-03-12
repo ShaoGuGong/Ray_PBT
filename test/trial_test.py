@@ -1,12 +1,13 @@
+import asyncio
 import os
+import random
 import sys
-from typing import List
 from itertools import islice
+from typing import List
 
 import ray
-import torch.nn as nn
 import torch
-import random
+import torch.nn as nn
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
@@ -34,7 +35,7 @@ def test():
     return os.listdir(os.getcwd())
 
 
-def generate_trial_states(n: int = 10) -> List[TrialState]:
+def generate_trial_states(n: int = 0) -> List[TrialState]:
     return [
         TrialState(
             i,
@@ -44,17 +45,16 @@ def generate_trial_states(n: int = 10) -> List[TrialState]:
                 batch_size=random.choice([64, 128, 256, 512, 1024]),
                 model_type=ModelType.RESNET_18,
             ),
-            stop_iteration=100,
+            stop_iteration=1,
         )
         for i in range(n)
     ]
 
 
 if __name__ == "__main__":
-    ray.init(runtime_env={"working_dir": "./src"})
+    ray.init(num_cpus=4, runtime_env={"working_dir": "./src", "exclude": ["logs/"]})
 
     print(ray.get(test.remote()))
-
     workers = generate_all_workers(train_step)
     print(*workers, sep="\n")
     worker = workers[0]
@@ -65,3 +65,4 @@ if __name__ == "__main__":
 
     scheduler = TrialScheduler(trial_states, workers)
     scheduler.run()
+    scheduler.get_workers_logs()
