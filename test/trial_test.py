@@ -1,4 +1,3 @@
-import asyncio
 import os
 import random
 import sys
@@ -11,10 +10,8 @@ import torch.nn as nn
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
-from main_bak import Trial
-from trial import Hyperparameter, TrialScheduler, TrialState
-from utils import ModelType
-from worker import generate_all_workers
+from trial import TrialScheduler, TrialState
+from utils import Hyperparameter, ModelType
 
 
 def train_step(model, optimizer, train_loader, batch_size, device=torch.device("cpu")):
@@ -54,15 +51,10 @@ def generate_trial_states(n: int = 0) -> List[TrialState]:
 if __name__ == "__main__":
     ray.init(num_cpus=4, runtime_env={"working_dir": "./src", "exclude": ["logs/"]})
 
-    print(ray.get(test.remote()))
-    workers = generate_all_workers(train_step)
-    print(*workers, sep="\n")
-    worker = workers[0]
-
     trial_states = generate_trial_states()
     print(f"總共{len(trial_states)} 個 Trial")
     print(*[t.hyperparameter for t in trial_states], sep="\n")
 
-    scheduler = TrialScheduler(trial_states, workers)
+    scheduler = TrialScheduler(train_step, trial_states)
     scheduler.run()
     scheduler.get_workers_logs()

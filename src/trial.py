@@ -1,16 +1,16 @@
 import asyncio
 import logging
 import os
-from dataclasses import dataclass
+from collections import defaultdict
 from datetime import datetime
 from typing import List
 
 import ray
-import torch.optim as optim
 from ray import ObjectRef
-from ray.actor import ActorHandle
 
-from utils import ModelType, TrialStatus, get_model
+from trial_state import TrialState
+from utils import Accuracy, TrainStepFunction
+from worker import generate_all_workers
 
 
 def get_trial_scheduler_logger() -> logging.Logger:
@@ -24,7 +24,8 @@ def get_trial_scheduler_logger() -> logging.Logger:
         logger.setLevel(logging.DEBUG)  # 或者選擇更合適的級別
 
         formatter = logging.Formatter(
-            "[%(asctime)s] %(levelname)s TRIAL_SCHEDULER -- %(message)s"
+            "[%(asctime)s] %(levelname)s TRIAL_SCHEDULER -- %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
         )
 
         stream_handler = logging.StreamHandler()
@@ -42,70 +43,38 @@ def get_trial_scheduler_logger() -> logging.Logger:
     return logger
 
 
-@dataclass
-class Hyperparameter:
-    lr: float
-    momentum: float
-    batch_size: int
-    model_type: ModelType
+@ray.remote
+class TrainResult:
+    def __init__(self) -> None:
+        self.accuracy_table: defaultdict = defaultdict(float)
 
+    def record_accuracy(self, accuracy: Accuracy, iteration: int) -> None:
+        self.accuracy_table[iteration] = max(self.accuracy_table[iteration], accuracy)
 
-@dataclass
-class Checkpoint:
-    model_state_dict: dict
-    optimzer_state_dict: dict
-    checkpoint_interval: int
-
-
-class TrialState:
-    def __init__(
-        self,
-        id: int,
-        hyperparameter: Hyperparameter,
-        stop_iteration: int = 10,
-    ) -> None:
-        self.id = id
-        self.hyperparameter = hyperparameter
-        self.stop_iteration = stop_iteration
-        self.status = TrialStatus.PENDING
-        self.worker_id = -1
-        self.run_time = 0
-        self.iteration = 0
-
-        model = get_model(self.hyperparameter.model_type)
-        optimizer = optim.SGD(
-            model.parameters(),
-            lr=self.hyperparameter.lr,
-            momentum=self.hyperparameter.momentum,
-        )
-
-        self.checkpoint = Checkpoint(
-            model.state_dict(),
-            optimizer.state_dict(),
-            0,
-        )
-        self.accuracy = 0.0
-        self.stop_accuracy = 0.5
-
-    def update_checkpoint(self, model, optimizer, iteration: int) -> None:
-        self.checkpoint.model_state_dict = model.state_dict()
-        self.checkpoint.optimzer_state_dict = optimizer.state_dict()
-        self.iteration = iteration
-
-    def __str__(self) -> str:
-        result = f"Trial: {str(self.hyperparameter)}\n {self.status=}\n {self.stop_iteration=}"
-        return result
+    def get_accuracy(self, iteration: int) -> Accuracy:
+        return self.accuracy_table[iteration]
 
 
 class TrialScheduler:
     def __init__(
-        self, trial_states: List[TrialState], workers: List[ActorHandle]
+        self,
+        train_step: TrainStepFunction,
+        trial_states: List[TrialState],
     ) -> None:
-        self.workers = workers
         self.trial_states = trial_states
         self.running_futures: List[ObjectRef] = []
         self.completed_trial_state = []
         self.logger = get_trial_scheduler_logger()
+        self.train_result = TrainResult.options(
+            max_concurrency=5,
+            num_cpus=1,
+            resources={
+                f"node:{ray.get_runtime_context().gcs_address.split(':')[0]}": 0.01
+            },
+        ).remote()
+        self.workers = generate_all_workers(
+            train_result=self.train_result, train_step=train_step
+        )
 
     def assign_trial_to_worker(self) -> List[ObjectRef]:
         available_futures = [
@@ -127,14 +96,6 @@ class TrialScheduler:
         trial = self.trial_states.pop(0)
         future = worker.assign_trial.remote(trial)
         self.running_futures.append(future)
-
-        # for worker in available_workers:
-        #     if not self.trial_states:
-        #         break
-        #
-        #     trial = self.trial_states.pop(0)
-        #     future = worker.assign_trial.remote(trial)
-        #     self.running_futures.append(future)
 
         return self.running_futures
 
@@ -166,6 +127,10 @@ class TrialScheduler:
             if isinstance(handler, logging.FileHandler):
                 log_dir = os.path.dirname(handler.baseFilename)  # 取得資料夾路徑
                 break
+
+        if log_dir is None:
+            self.logger.error("logs檔案資料夾不存在")
+            return
 
         for worker in self.workers:
             future = ray.get(worker.get_log_file.remote())

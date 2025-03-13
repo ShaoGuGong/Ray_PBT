@@ -1,18 +1,15 @@
 import logging
 import os
-from dataclasses import dataclass
-from typing import Any, Dict, List, Protocol
+from typing import Dict, List, Union
 
 import ray
 import torch
 import torch.optim as optim
 from ray.actor import ActorHandle
 
-from trial import TrialState
-from utils import TrialStatus, get_data_loader, get_model
-
-# Type Define
-Accuracy = float
+from trial_state import TrialState
+from utils import (Accuracy, TrainStepFunction, TrialStatus, WorkerState,
+                   get_data_loader, get_model)
 
 
 class WorkerLoggerFormatter(logging.Formatter):
@@ -58,24 +55,13 @@ def get_worker_logger(worker_id: int) -> logging.Logger:
     return logger
 
 
-class TrainStepFunction(Protocol):
-    def __call__(self, *args: Any, **kwargs: Any) -> None: ...
-
-
-@dataclass
-class WorkerState:
-    id: int
-    num_cpus: int
-    num_gpus: int
-    node_name: str
-    calculate_ability: float = 0.0
-    max_trials: int = 1
-
-
 @ray.remote
 class Worker:
     def __init__(
-        self, worker_state: WorkerState, train_step: TrainStepFunction
+        self,
+        worker_state: WorkerState,
+        train_result: ActorHandle,
+        train_step: TrainStepFunction,
     ) -> None:
         self.worker_state = worker_state
         self.active_trials = {}
@@ -162,7 +148,7 @@ class Worker:
         self.active_trials.pop(trial_state.id)
         trial_state.status = TrialStatus.TERMINAL
 
-    def get_log_file(self) -> Dict[str, int]:
+    def get_log_file(self) -> Dict[str, Union[int, str]]:
         log_dir = None
 
         for handler in self.logger.handlers:
@@ -177,40 +163,55 @@ class Worker:
         with open(log_dir, "r") as f:
             return {"id": self.worker_state.id, "content": f.read()}
 
+    # TODO: finished send training result to TrainResult Actor
+    def update_train_result(self) -> None:
+        raise NotImplementedError
 
-def generate_all_workers(train_step: TrainStepFunction) -> List[ActorHandle]:
+
+def generate_all_workers(
+    train_result: ActorHandle, train_step: TrainStepFunction
+) -> List[ActorHandle]:
     visited_address = set()
     worker_states = []
     index = 0
+    head_node_address = ray.get_runtime_context().gcs_address.split(":")[0]
 
     # Fetch all avaiable resource from Ray cluster.
     for node in ray.nodes():
+        node_address = node["NodeManagerAddress"]
+
         if node["Alive"]:
-            if node["NodeManagerAddress"] in visited_address:
+            if node_address in visited_address:
                 continue
 
             resource = node["Resources"]
             if "CPU" in resource:
+                if node_address == head_node_address:
+                    cpus = min(resource.get("CPU", 1) - 1, 0)
+                else:
+                    cpus = resource.get("CPU", 1)
+
                 worker_states.append(
                     WorkerState(
                         id=index,
-                        num_cpus=resource.get("CPU", 0),
+                        num_cpus=cpus,
                         num_gpus=0,
-                        node_name=f"node:{node['NodeManagerAddress']}",
+                        node_name=f"node:{node_address}",
                     )
                 )
                 index += 1
+
             if "GPU" in resource:
                 worker_states.append(
                     WorkerState(
                         id=index,
                         num_cpus=0,
                         num_gpus=resource.get("GPU", 0),
-                        node_name=f"node:{node['NodeManagerAddress']}",
+                        node_name=f"node:{node_address}",
                     )
                 )
                 index += 1
-            visited_address.add(node["NodeManagerAddress"])
+            visited_address.add(node_address)
 
     workers: list[ActorHandle] = []
     print(*worker_states)
@@ -223,7 +224,7 @@ def generate_all_workers(train_step: TrainStepFunction) -> List[ActorHandle]:
                 num_cpus=worker_state.num_cpus,
                 num_gpus=worker_state.num_gpus,
                 resources={worker_state.node_name: 0.01},
-            ).remote(worker_state, train_step=train_step)
+            ).remote(worker_state, train_result=train_result, train_step=train_step)
         )
 
     return workers

@@ -7,11 +7,6 @@ from pprint import pp
 
 import ray
 
-from worker import generate_all_workers
-
 ray.init()
 if __name__ == "__main__":
-    workers = generate_all_workers()
-
-    print(ray.get_actor("worker-0"))
-    print(workers)
+    print(ray.get_runtime_context().gcs_address)

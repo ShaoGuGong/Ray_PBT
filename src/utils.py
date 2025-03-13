@@ -1,15 +1,25 @@
 import os
+from dataclasses import dataclass
 from enum import Enum, auto
 from functools import reduce
-from typing import Callable, TypeVar
-
+from typing import Any, Callable, Protocol, TypeVar
 
 import torch.nn as nn
-from torch.utils import data
 import torchvision
 import torchvision.models as models
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
+
+# ╭──────────────────────────────────────────────────────────╮
+# │                       Type Define                        │
+# ╰──────────────────────────────────────────────────────────╯
+
+Accuracy = float
+
+
+class TrainStepFunction(Protocol):
+    def __call__(self, *args: Any, **kwargs: Any) -> None: ...
+
 
 # ╭──────────────────────────────────────────────────────────╮
 # │                          Enums                           │
@@ -26,6 +36,36 @@ class TrialStatus(Enum):
     PENDING = auto()
     TERMINAL = auto()
     PAUSE = auto()
+
+
+# ╭──────────────────────────────────────────────────────────╮
+# │                       Dataclasses                        │
+# ╰──────────────────────────────────────────────────────────╯
+
+
+@dataclass
+class WorkerState:
+    id: int
+    num_cpus: int
+    num_gpus: int
+    node_name: str
+    calculate_ability: float = 0.0
+    max_trials: int = 1
+
+
+@dataclass
+class Hyperparameter:
+    lr: float
+    momentum: float
+    batch_size: int
+    model_type: ModelType
+
+
+@dataclass
+class Checkpoint:
+    model_state_dict: dict
+    optimzer_state_dict: dict
+    checkpoint_interval: int
 
 
 # ╭──────────────────────────────────────────────────────────╮
