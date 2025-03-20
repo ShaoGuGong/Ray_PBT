@@ -4,6 +4,7 @@ from enum import Enum, auto
 from functools import reduce
 from typing import Any, Callable, Protocol, TypeVar
 
+import ray
 import torch.nn as nn
 import torchvision
 import torchvision.models as models
@@ -156,3 +157,7 @@ def get_model(model_type: ModelType):
         model = models.resnet50()
         model.fc = nn.Linear(model.fc.in_features, 100)
         return model
+
+
+def get_head_node_address() -> str:
+    return ray.get_runtime_context().gcs_address.split(":")[0]

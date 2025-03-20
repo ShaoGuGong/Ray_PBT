@@ -1,30 +1,49 @@
+from collections import defaultdict
 from typing import List
 
-from trial import Hyperparameter, TrialScheduler, TrialState
+import ray
+
+from trial import TrialScheduler
+from trial_state import TrialState
+from utils import TrainStepFunction
 from worker import generate_all_workers
 
 
+@ray.remote
 class Tuner:
     def __init__(
-        self, hyperparameters: List[Hyperparameter], stop_iteration: int = 1000
+        self,
+        trial_states: List[TrialState],
+        train_step: TrainStepFunction,
     ) -> None:
-        self.workers = generate_all_workers()
-        self.hyperparemeters = hyperparameters
-        self.stop_iteration = stop_iteration
-        self.num_hyperparameters = len(self.hyperparemeters)
-        self.package_size = (len(self.workers) - self.num_hyperparameters) // 3
-        self.trial_states = self._generate_trail_states()
-        self.max_iteration = 1000
-        self.trial_scheduler = TrialScheduler(self.hyperparemeters, self.workers)
+        self.trial_states = trial_states
 
-    def _generate_trail_states(self) -> List[TrialState]:
-        result = []
+        print(f"總共{len(trial_states)} 個 Trial")
+        print(*[t.hyperparameter for t in trial_states], sep="\n")
 
-        for index, hyperparameter in enumerate(self.hyperparemeters):
-            result.append(TrialState(index, hyperparameter, self.stop_iteration))
-
-        return result
+        self.workers = generate_all_workers(
+            ray.get_runtime_context().current_actor, train_step=train_step
+        )
+        self.scheduler = TrialScheduler(self.workers, trial_states)
+        self.accuracy_table = defaultdict(float)
 
     def run(self) -> None:
+        print("Tuner Start")
+        self.scheduler.run()
+        self.scheduler.get_workers_logs()
+        print("Tuner End")
 
-        return
+    def record_accuracy(self, accuracy: float, iteration: int) -> None:
+        self.accuracy_table[iteration] = max(self.accuracy_table[iteration], accuracy)
+        self.print_accuracy_table()
+
+    def get_accuracy(self, iteration: int) -> float:
+        return self.accuracy_table[iteration]
+
+    def print_accuracy_table(self) -> None:
+        print("┏━━━━━━━━━━━┳━━━━━━━━━━┓")
+        print("┃ Iteration ┃ Accuracy ┃")
+        print("┡━━━━━━━━━━━╇━━━━━━━━━━┩")
+        for k, v in self.accuracy_table.items():
+            print(f"│ {k:9d} │ {v:8.4f} │")
+        print("└───────────┴──────────┘")
