@@ -2,7 +2,6 @@ import asyncio
 import logging
 import os
 import time
-from collections import defaultdict
 from datetime import datetime
 from typing import List
 
@@ -12,7 +11,6 @@ from ray.actor import ActorHandle
 
 from trial_state import TrialState
 from utils import TrialStatus
-from worker import generate_all_workers
 
 
 def get_trial_scheduler_logger() -> logging.Logger:
@@ -186,6 +184,7 @@ class TrialScheduler:
                         f"✅ Worker {trial_state.worker_id} 完成 Trial {trial_state.id} ，Accuracy: {trial_state.accuracy:.2f}"
                     )
                 if trial_state.status == TrialStatus.PAUSE:
+                    trial_state.status = TrialStatus.PENDING
                     self.trial_states.append(trial_state)
                     self.logger.info(
                         f"🔃 Worker {trial_state.worker_id} 回傳未完成 Trial {trial_state.id}, Iteration: {trial_state.iteration} ，Accuracy: {trial_state.accuracy:.2f}"

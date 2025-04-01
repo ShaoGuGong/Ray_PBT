@@ -1,7 +1,7 @@
 import logging
 import os
 import random
-from typing import Dict, List, Union
+from typing import Dict, List, Optional, Union
 
 import ray
 import torch
@@ -115,8 +115,9 @@ class Worker:
         self.train_step = train_step
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.logger = get_worker_logger(worker_id=worker_state.id)
-        self.logger.info("初始化完成", extra={"worker_id": self.worker_state.id})
+        self.log("info", "初始化完成")
         self.tuner = tuner
+        self.mutation_iteration: int = 2
 
     def assign_trial(self, trial_state: TrialState) -> TrialState:
         """
@@ -161,11 +162,7 @@ class Worker:
         Returns:
             TrialState: 更新後的試驗狀態。
         """
-
-        self.logger.info(
-            f"開始訓練",
-            extra={"worker_id": self.worker_state.id, "trial_id": trial_state.id},
-        )
+        self.log("info", "開始訓練", trial_id=trial_state.id)
 
         hyper = trial_state.hyperparameter
         checkpoint = trial_state.checkpoint
@@ -194,54 +191,49 @@ class Worker:
 
             trial_state.accuracy = self.test(model, test_loader)
 
-            self.logger.info(
+            self.log(
+                "info",
                 f"Iteration: {trial_state.iteration} Accuracy: {trial_state.accuracy}",
-                extra={"worker_id": self.worker_state.id, "trial_id": trial_state.id},
+                trial_id=trial_state.id,
             )
 
             trial_state.iteration += 1
 
-            if trial_state.iteration % 1 == 0:
-                if trial_state.accuracy > ray.get(
-                    self.tuner.get_accuracy.remote(trial_state.iteration)
-                ):
-                    self.logger.info(
-                        f"向 Tuner 更新 Accuracy:",
-                        extra={
-                            "worker_id": self.worker_state.id,
-                            "trial_id": trial_state.id,
-                        },
-                    )
+            if trial_state.iteration % self.mutation_iteration:
+                continue
 
-                    ray.get(
-                        self.tuner.record_accuracy.remote(
-                            accuracy=trial_state.accuracy,
-                            iteration=trial_state.iteration,
-                        )
-                    )
-                elif random.choice([True, False, False]):
-                    self.logger.info(
-                        f"執行mutation",
-                        extra={
-                            "worker_id": self.worker_state.id,
-                            "trial_id": trial_state.id,
-                        },
-                    )
-                else:
-                    self.logger.info(
-                        f"訓練中止並回傳",
-                        extra={
-                            "worker_id": self.worker_state.id,
-                            "trial_id": trial_state.id,
-                        },
-                    )
-                    self.pause_trial(trial_state)
-                    return trial_state
-        self.logger.info(
-            f"訓練結束",
-            extra={"worker_id": self.worker_state.id, "trial_id": trial_state.id},
-        )
+            ray.get(
+                self.tuner.update_trial_result.remote(
+                    iteration=trial_state.iteration,
+                    accuracy=trial_state.accuracy,
+                    hyperparameter=trial_state.hyperparameter,
+                )
+            )
 
+            base_line = ray.get(
+                self.tuner.get_mean_accuracy.remote(iteration=trial_state.iteration)
+            )
+
+            if trial_state.accuracy >= base_line:
+                continue
+
+            self.log(
+                "info",
+                f"Accuracy:{trial_state.accuracy:.4f} < Base Line:{base_line:.4f}",
+                trial_id=trial_state.id,
+            )
+
+            if random.choice((False, False, True)):
+                self.log(
+                    "info",
+                    f"訓練中止，Trial回傳",
+                    trial_id=trial_state.id,
+                )
+
+            self.pause_trial(trial_state)
+            return trial_state
+
+        self.log("info", f"訓練結束", trial_id=trial_state.id)
         self.finish_trial(trial_state)
 
         return trial_state
@@ -300,11 +292,38 @@ class Worker:
                 break
 
         if not log_dir:
-            self.logger.error("Logs direction is not exists")
+            self.log("error", "Logs direction is not exists")
             return {"id": self.worker_state.id, "content": ""}
 
         with open(log_dir, "r") as f:
             return {"id": self.worker_state.id, "content": f.read()}
+
+    def log(self, level: str, message: str, trial_id: Optional[int] = None) -> None:
+        if level == "info":
+            self.logger.info(
+                message, extra={"worker_id": self.worker_state.id, "trial_id": trial_id}
+            )
+            return
+        if level == "debug":
+            self.logger.info(
+                message, extra={"worker_id": self.worker_state.id, "trial_id": trial_id}
+            )
+            return
+        if level == "warning":
+            self.logger.warning(
+                message, extra={"worker_id": self.worker_state.id, "trial_id": trial_id}
+            )
+            return
+        if level == "critical":
+            self.logger.critical(
+                message, extra={"worker_id": self.worker_state.id, "trial_id": trial_id}
+            )
+            return
+        if level == "error":
+            self.logger.error(
+                message, extra={"worker_id": self.worker_state.id, "trial_id": trial_id}
+            )
+            return
 
 
 def generate_all_workers(
