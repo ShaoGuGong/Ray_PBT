@@ -6,9 +6,9 @@ import ray
 import torch
 import torch.nn as nn
 
-from trial_state import TrialState
-from tuner import Tuner
-from utils import Hyperparameter, ModelType, get_head_node_address
+from src.trial_state import TrialState
+from src.tuner import Tuner
+from src.utils import Hyperparameter, ModelType, get_head_node_address
 
 
 def generate_trial_states(n: int = 1) -> List[TrialState]:
@@ -21,7 +21,7 @@ def generate_trial_states(n: int = 1) -> List[TrialState]:
                 batch_size=random.choice([64, 128, 256, 512, 1024]),
                 model_type=ModelType.RESNET_18,
             ),
-            stop_iteration=10,
+            stop_iteration=1000,
         )
         for i in range(n)
     ]
@@ -41,7 +41,12 @@ def train_step(model, optimizer, train_loader, batch_size, device=torch.device("
 
 
 if __name__ == "__main__":
-    ray.init(runtime_env={"working_dir": "./src", "exclude": ["logs/"]})
+    ray.init(
+        runtime_env={
+            "working_dir": ".",
+            "excludes": [".git", "test", "logs/*", "LICENSE", "README.md"],
+        }
+    )
 
     tuner = Tuner.options(
         max_concurrency=3,

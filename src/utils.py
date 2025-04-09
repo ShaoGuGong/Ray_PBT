@@ -11,6 +11,8 @@ import torchvision.models as models
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
 
+from .config import DATASET_PATH
+
 # ╭──────────────────────────────────────────────────────────╮
 # │                       Type Define                        │
 # ╰──────────────────────────────────────────────────────────╯
@@ -94,32 +96,53 @@ def pipe(*functions: Composeable) -> Composeable:
 def get_data_loader(
     model_type: ModelType,
     batch_size: int = 64,
-    transform=None,
-    data_dir="~/Documents/dataset/",
+    train_transform=None,
+    test_transform=None,
+    data_dir=DATASET_PATH,
 ) -> tuple:
     data_dir = os.path.expanduser(data_dir)
     if not os.path.exists(data_dir):
         os.makedirs(data_dir)
 
-    if transform is None:
-        transform = transforms.Compose(
+    if train_transform is None:
+        train_transform = transforms.Compose(
+            [
+                transforms.RandomCrop(32, padding=4),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    (0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)
+                ),
+            ]
+        )
+
+    if test_transform is None:
+        test_transform = transforms.Compose(
             [
                 transforms.ToTensor(),
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                transforms.Normalize(
+                    (0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)
+                ),
             ]
+        )
+
+    if not os.path.exists(os.path.join(data_dir, "cifar-10-batches-py")):
+        print(f"{os.path.join(data_dir, 'cifar-10-batches-py')} 不存在")
+        torchvision.datasets.CIFAR10(
+            root=data_dir, train=True, download=True, transform=None
         )
 
     if model_type == ModelType.RESNET_18:
         train_loader = DataLoader(
             torchvision.datasets.CIFAR10(
-                root=data_dir, train=True, download=True, transform=transform
+                root=data_dir, train=True, download=False, transform=train_transform
             ),
             batch_size=batch_size,
             shuffle=True,
         )
         test_loader = DataLoader(
             torchvision.datasets.CIFAR10(
-                root=data_dir, train=False, download=True, transform=transform
+                root=data_dir, train=False, download=False, transform=test_transform
             ),
             batch_size=batch_size,
             shuffle=False,
@@ -129,7 +152,7 @@ def get_data_loader(
     elif model_type == ModelType.RESNET_50:
         train_loader = DataLoader(
             torchvision.datasets.CIFAR100(
-                root=data_dir, train=True, download=True, transform=transform
+                root=data_dir, train=True, download=False, transform=train_transform
             ),
             batch_size=batch_size,
             shuffle=True,
@@ -137,7 +160,7 @@ def get_data_loader(
 
         test_loader = DataLoader(
             torchvision.datasets.CIFAR100(
-                root=data_dir, train=False, download=True, transform=transform
+                root=data_dir, train=False, download=False, transform=test_transform
             ),
             batch_size=batch_size,
             shuffle=False,

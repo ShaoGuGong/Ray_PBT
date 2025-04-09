@@ -7,6 +7,7 @@ from numpy import random
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
+import config
 from utils import compose, pipe
 
 

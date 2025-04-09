@@ -1,13 +1,47 @@
+import logging
+import os
 import random
 from dataclasses import replace
+from datetime import datetime
 from typing import List
 
 import ray
 
-from trial import TrialScheduler
-from trial_state import TrialResult, TrialState
-from utils import Hyperparameter, ModelType, TrainStepFunction
-from worker import generate_all_workers
+from .trial import TrialScheduler
+from .trial_state import TrialResult, TrialState
+from .utils import Checkpoint, Hyperparameter, ModelType, TrainStepFunction
+from .worker import generate_all_workers
+
+
+def get_tuner_logger() -> logging.Logger:
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    log_dir = os.path.join(os.getcwd(), "logs/", timestamp)
+    os.makedirs(log_dir, exist_ok=True)
+
+    logger = logging.getLogger(f"Tuner")
+
+    if not logger.handlers:
+        logger.setLevel(logging.DEBUG)  # 或者選擇更合適的級別
+
+        formatter = logging.Formatter(
+            "[%(asctime)s] %(levelname)s TUNER -- %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+
+        stream_handler = logging.StreamHandler()
+        stream_handler.setLevel(logging.INFO)  # 只顯示 INFO 級別以上的訊息
+        stream_handler.setFormatter(formatter)
+        logger.addHandler(stream_handler)
+
+        file_handler = logging.FileHandler(
+            os.path.join(log_dir, f"trial_scheduler.log")
+        )
+        file_handler.setLevel(logging.DEBUG)  # 記錄所有級別的日誌
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+
+    return logger
 
 
 @ray.remote
@@ -18,48 +52,63 @@ class Tuner:
         train_step: TrainStepFunction,
     ) -> None:
         self.trial_states = trial_states
+        self.logger = get_tuner_logger()
 
-        print(f"總共{len(trial_states)} 個 Trial")
-        print(*[t.hyperparameter for t in trial_states], sep="\n")
+        self.logger.info(f"總共{len(trial_states)} 個 Trial")
+        self.logger.info("\n".join([str(t.hyperparameter) for t in trial_states]))
 
         self.workers = generate_all_workers(
             ray.get_runtime_context().current_actor, train_step=train_step
         )
-        self.scheduler: TrialScheduler = TrialScheduler(self.workers, trial_states)
+
+        self.scheduler: TrialScheduler = TrialScheduler(
+            ray.get_runtime_context().current_actor, self.workers, trial_states
+        )
         self.trial_result: TrialResult = TrialResult()
 
     def run(self) -> None:
-        print("Tuner Start")
+        self.logger.info("開始訓練")
         self.scheduler.run()
         self.scheduler.get_workers_logs()
-        print("Tuner End")
+        self.logger.info("結束訓練")
 
     def update_trial_result(
-        self, iteration: int, accuracy: float, hyperparameter: Hyperparameter
+        self,
+        iteration: int,
+        accuracy: float,
+        hyperparameter: Hyperparameter,
+        checkpoint: Checkpoint,
     ):
-        self.trial_result.update_train_result(iteration, accuracy, hyperparameter)
+        self.trial_result.update_train_result(
+            iteration, accuracy, hyperparameter, checkpoint
+        )
 
-    def mutation(self) -> Hyperparameter:
-        hyperparameter = self.trial_result.get_history_best_result()[1]
+    def mutation(self, trial_state: TrialState) -> TrialState:
+        self.logger.info(
+            f"Trial {trial_state.id}: 執行mutation, Original Hyperparameter: {trial_state.hyperparameter}"
+        )
+        _, hyperparameter, checkpoint = self.trial_result.get_history_best_result()
 
-        if hyperparameter is None:
-            return Hyperparameter(
-                lr=random.uniform(0.001, 1),
-                momentum=random.uniform(0.001, 1),
-                batch_size=random.choice([64, 128, 256, 512, 1024]),
-                model_type=ModelType.RESNET_18,
-            )
-
-        mutation_options = (
+        mutation_hyperparameter = (
             ("lr", random.uniform(0.001, 1)),
             ("momentum", random.uniform(0.001, 1)),
             ("batch_size", random.choice([64, 128, 256, 512, 1024])),
         )
 
-        return replace(
-            hyperparameter,
-            **{k: v for k, v in random.sample(mutation_options, 2)},
+        if hyperparameter:
+            trial_state.hyperparameter = replace(
+                hyperparameter,
+                **{k: v for k, v in random.sample(mutation_hyperparameter, 2)},
+            )
+
+        self.logger.info(
+            f"Trial {trial_state.id}: 結束mutation, New Hyperparameter: {trial_state.hyperparameter}"
         )
+
+        if checkpoint:
+            trial_state.checkpoint = checkpoint
+
+        return trial_state
 
     def get_mean_accuracy(self, iteration):
         return self.trial_result.get_mean_accuray(iteration)

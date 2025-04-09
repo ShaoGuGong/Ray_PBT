@@ -1,16 +1,17 @@
 import logging
 import os
 import random
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Union
 
 import ray
 import torch
 import torch.optim as optim
 from ray.actor import ActorHandle
 
-from trial_state import TrialState
-from utils import (Accuracy, TrainStepFunction, TrialStatus, WorkerState,
-                   get_data_loader, get_head_node_address, get_model)
+from .config import MUTATION_ITERATION
+from .trial_state import TrialState
+from .utils import (Accuracy, TrainStepFunction, TrialStatus, WorkerState,
+                    get_data_loader, get_head_node_address, get_model)
 
 
 class WorkerLoggerFormatter(logging.Formatter):
@@ -110,14 +111,14 @@ class Worker:
             train_step (TrainStepFunction): 訓練步驟函數。
         """
 
-        self.worker_state = worker_state
+        self.worker_state: WorkerState = worker_state
         self.active_trials = {}
         self.train_step = train_step
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.logger = get_worker_logger(worker_id=worker_state.id)
         self.log("info", "初始化完成")
         self.tuner = tuner
-        self.mutation_iteration: int = 2
+        self.mutation_iteration: int = MUTATION_ITERATION
 
     def assign_trial(self, trial_state: TrialState) -> TrialState:
         """
@@ -132,6 +133,7 @@ class Worker:
 
         self.active_trials[trial_state.id] = trial_state
         trial_state.worker_id = self.worker_state.id
+        self.log("info", f"執行中Trial: {[i for i in self.active_trials]}")
         return self.train(trial_state)
 
     def get_active_trials_nums(self) -> int:
@@ -191,13 +193,13 @@ class Worker:
 
             trial_state.accuracy = self.test(model, test_loader)
 
+            trial_state.iteration += 1
+
             self.log(
                 "info",
                 f"Iteration: {trial_state.iteration} Accuracy: {trial_state.accuracy}",
                 trial_id=trial_state.id,
             )
-
-            trial_state.iteration += 1
 
             if trial_state.iteration % self.mutation_iteration:
                 continue
@@ -207,6 +209,7 @@ class Worker:
                     iteration=trial_state.iteration,
                     accuracy=trial_state.accuracy,
                     hyperparameter=trial_state.hyperparameter,
+                    checkpoint=trial_state.checkpoint,
                 )
             )
 
@@ -226,12 +229,12 @@ class Worker:
             if random.choice((False, False, True)):
                 self.log(
                     "info",
-                    f"訓練中止，Trial回傳",
+                    f"🚫 訓練中止並回傳",
                     trial_id=trial_state.id,
                 )
 
-            self.pause_trial(trial_state)
-            return trial_state
+                self.pause_trial(trial_state)
+                return trial_state
 
         self.log("info", f"訓練結束", trial_id=trial_state.id)
         self.finish_trial(trial_state)
@@ -298,7 +301,7 @@ class Worker:
         with open(log_dir, "r") as f:
             return {"id": self.worker_state.id, "content": f.read()}
 
-    def log(self, level: str, message: str, trial_id: Optional[int] = None) -> None:
+    def log(self, level: str, message: str, trial_id: Union[int, str] = "N/A") -> None:
         if level == "info":
             self.logger.info(
                 message, extra={"worker_id": self.worker_state.id, "trial_id": trial_id}
@@ -368,6 +371,7 @@ def generate_all_workers(
                         num_cpus=cpus,
                         num_gpus=0,
                         node_name=f"node:{node_address}",
+                        max_trials=3,
                     )
                 )
                 index += 1
@@ -379,6 +383,7 @@ def generate_all_workers(
                         num_cpus=0,
                         num_gpus=resource.get("GPU", 0),
                         node_name=f"node:{node_address}",
+                        max_trials=3,
                     )
                 )
                 index += 1

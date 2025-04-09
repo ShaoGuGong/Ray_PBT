@@ -3,7 +3,8 @@ from typing import Dict, List, Optional, Tuple
 
 import torch.optim as optim
 
-from utils import Checkpoint, Hyperparameter, TrialStatus, get_model
+from .config import STOP_ACCURACY
+from .utils import Checkpoint, Hyperparameter, TrialStatus, get_model
 
 
 class TrialState:
@@ -35,12 +36,7 @@ class TrialState:
         )
 
         self.accuracy = 0.0
-        self.stop_accuracy = 0.5
-
-    def update_checkpoint(self, model, optimizer, iteration: int) -> None:
-        self.checkpoint.model_state_dict = model.state_dict()
-        self.checkpoint.optimzer_state_dict = optimizer.state_dict()
-        self.iteration = iteration
+        self.stop_accuracy = STOP_ACCURACY
 
     def __str__(self) -> str:
         result = f"Trial: {str(self.hyperparameter)}\n {self.status=}\n {self.stop_iteration=}"
@@ -52,15 +48,23 @@ class TrialResult:
         self.table: Dict[int, List[Tuple[float, Hyperparameter]]] = defaultdict(list)
         self.top_k: int = top_k
         self.bottom_k: int = bottom_k
-        self.history_best: Tuple[float, Optional[Hyperparameter]] = (0.0, None)
+        self.history_best: Tuple[
+            float, Optional[Hyperparameter], Optional[Checkpoint]
+        ] = (0.0, None, None)
 
     def update_train_result(
-        self, iteration: int, accuracy: float, hyperparameter: Hyperparameter
+        self,
+        iteration: int,
+        accuracy: float,
+        hyperparameter: Hyperparameter,
+        checkpoint: Checkpoint,
     ) -> None:
         self.table[iteration].append((accuracy, hyperparameter))
-        self.table[iteration].sort(reverse=True)
+        self.table[iteration].sort(key=lambda x: x[0], reverse=True)
         if accuracy > self.history_best[0]:
-            self.history_best = (accuracy, hyperparameter)
+            self.history_best = (accuracy, hyperparameter, checkpoint)
+
+        self.display_results()
 
     def get_mean_accuray(self, iteration: int) -> float:
         return sum([i[0] for i in self.table[iteration]]) / len(self.table[iteration])
@@ -68,7 +72,9 @@ class TrialResult:
     def get_top_k_result(self, iteration: int) -> List[Tuple[float, Hyperparameter]]:
         return self.table[iteration][: self.top_k]
 
-    def get_history_best_result(self) -> Tuple[float, Optional[Hyperparameter]]:
+    def get_history_best_result(
+        self,
+    ) -> Tuple[float, Optional[Hyperparameter], Optional[Checkpoint]]:
         return self.history_best
 
     def display_results(self) -> None:
@@ -82,7 +88,10 @@ class TrialResult:
 
         for iteration, row in self.table.items():
             top = row[: self.top_k]
+
             bot = row[-self.bottom_k :]
+            if len(row) <= self.top_k:
+                bot = []
 
             for data in sorted(top, key=lambda x: x[0] * -1):
                 hyper = data[1]
@@ -91,11 +100,11 @@ class TrialResult:
 
                 print(f"┃{'':^4}┃{'':^8}┃{accuracy:^15.6f}┃{output:^35}┃")
 
-            print(f"\033[s\033[{(self.top_k+1)//2}A\033[8G", end="")
+            print(f"\033[s\033[{(len(top)+1)//2}A\033[8C", end="")
             print(f"{'top-'+str(self.top_k):^4}\033[u", end="")
 
-            if self.bottom_k == 0:
-                print(f"\033[s\033[{(self.top_k+self.bottom_k+2)//2}A\033[2G", end="")
+            if self.bottom_k == 0 or len(bot) == 0:
+                print(f"\033[s\033[{(len(top)+len(bot)+2)//2}A\033[1C", end="")
                 print(f"{iteration:^4}\033[u", end="")
                 print(f"┣{'':━^4}╋{'':━^8}╋{'':━^15}╋{'':━^35}┫")
                 continue
@@ -106,13 +115,15 @@ class TrialResult:
                 accuracy = data[0]
                 output = f"lr:{hyper.lr:5.2f} momentum:{hyper.momentum:5.2f} batch:{hyper.batch_size:4}"
 
-                print(f"┃{'':^4}┃{'':^8}┃{-accuracy:^15.6f}┃{output:^35}┃")
-            print(f"\033[s\033[{(self.bottom_k+1)//2}A\033[8G", end="")
-            print(f"{'bot':^4}\033[u", end="")
-            print(f"\033[s\033[{(self.top_k+self.bottom_k+2)//2}A\033[2G", end="")
+                print(f"┃{'':^4}┃{'':^8}┃{accuracy:^15.6f}┃{output:^35}┃")
+            print(f"\033[s\033[{(len(bot)+1)//2}A\033[8C", end="")
+            print(f"{'bot-'+str(self.bottom_k):^4}\033[u", end="")
+            print(f"\033[s\033[{(len(top)+len(bot)+2)//2}A\033[1C", end="")
             print(f"{iteration:^4}\033[u", end="")
             print(f"┣{'':━^4}╋{'':━^8}╋{'':━^15}╋{'':━^35}┫")
-        print(f"\033[A\033[0G┗{'':━^4}┻{'':━^8}┻{'':━^15}┻{'':━^35}┛")
+        print(f"\033[A┗{'':━^4}┻{'':━^8}┻{'':━^15}┻{'':━^35}┛")
+
+        print(f"History Best: {self.history_best[0]} {self.history_best[1]}")
 
     def to_json(self) -> str:
         import json

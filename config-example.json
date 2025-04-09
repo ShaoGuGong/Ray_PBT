@@ -1,0 +1,5 @@
+{
+  "dataset_path": "/home/ray_cluster/Documents/workspace/tune_population_based/data",
+  "stop_accuracy": 0.9,
+  "mutation_iteration": 20
+}

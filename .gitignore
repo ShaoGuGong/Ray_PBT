@@ -1,4 +1,4 @@
 src/__pycache__
-config.toml
 logs/
 *.log
+config.json

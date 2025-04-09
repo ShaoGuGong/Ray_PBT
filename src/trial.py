@@ -9,8 +9,8 @@ import ray
 from ray import ObjectRef
 from ray.actor import ActorHandle
 
-from trial_state import TrialState
-from utils import TrialStatus
+from .trial_state import TrialState
+from .utils import TrialStatus
 
 
 def get_trial_scheduler_logger() -> logging.Logger:
@@ -67,6 +67,7 @@ class TrialScheduler:
 
     def __init__(
         self,
+        tuner: ActorHandle,
         workers: List[ActorHandle],
         trial_states: List[TrialState],
     ) -> None:
@@ -77,7 +78,8 @@ class TrialScheduler:
             train_step (TrainStepFunction): 訓練步驟函數。
             trial_states (List[TrialState]): 初始的試驗狀態列表。
         """
-        self.trial_states = trial_states
+        self.tuner = tuner
+        self.pending_trial_states = trial_states
         self.running_futures: List[ObjectRef] = []
         self.completed_trial_state = []
         self.logger = get_trial_scheduler_logger()
@@ -93,6 +95,10 @@ class TrialScheduler:
         Returns:
             List[ObjectRef]: 當前正在運行的訓練任務列表。
         """
+        self.logger.info(
+            f"⏳ 等待中訓練任務列表: {sorted([i.id for i in self.pending_trial_states])}"
+        )
+
         available_futures = [
             worker.has_available_slots.remote() for worker in self.workers
         ]
@@ -111,8 +117,8 @@ class TrialScheduler:
 
         worker = next(iter(available_workers))
 
-        if self.trial_states:
-            trial = self.trial_states.pop(0)
+        if self.pending_trial_states:
+            trial = self.pending_trial_states.pop(0)
             future = worker.assign_trial.remote(trial)
             self.running_futures.append(future)
 
@@ -128,10 +134,10 @@ class TrialScheduler:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
-        while self.running_futures or self.trial_states:
+        while self.running_futures or self.pending_trial_states:
             self.assign_trial_to_worker()
 
-            if not self.running_futures and not self.trial_states:
+            if not self.running_futures and not self.pending_trial_states:
                 break
 
             done_futures, self.running_futures = ray.wait(
@@ -183,11 +189,15 @@ class TrialScheduler:
                     self.logger.info(
                         f"✅ Worker {trial_state.worker_id} 完成 Trial {trial_state.id} ，Accuracy: {trial_state.accuracy:.2f}"
                     )
+                    self.logger.info(
+                        f"✅ 已完成的訓練任務列表: {sorted([i.id for i in self.completed_trial_state])}"
+                    )
                 if trial_state.status == TrialStatus.PAUSE:
                     trial_state.status = TrialStatus.PENDING
-                    self.trial_states.append(trial_state)
+                    self.pending_trial_states.append(trial_state)
                     self.logger.info(
                         f"🔃 Worker {trial_state.worker_id} 回傳未完成 Trial {trial_state.id}, Iteration: {trial_state.iteration} ，Accuracy: {trial_state.accuracy:.2f}"
                     )
+                    trial_state = ray.get(self.tuner.mutation.remote(trial_state))
             except Exception as e:
                 self.logger.error(f"❌ Future 執行失敗: {e}")
