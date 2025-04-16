@@ -4,7 +4,8 @@ from typing import Dict, List, Optional, Tuple
 import torch.optim as optim
 
 from .config import STOP_ACCURACY
-from .utils import Checkpoint, Hyperparameter, TrialStatus, get_model
+from .utils import (Checkpoint, Hyperparameter, TrialStatus, WorkerType,
+                    get_model)
 
 
 class TrialState:
@@ -19,8 +20,10 @@ class TrialState:
         self.stop_iteration = stop_iteration
         self.status = TrialStatus.PENDING
         self.worker_id = -1
+        self.worker_type: Optional[WorkerType] = None
         self.run_time = 0
         self.iteration = 0
+        self.device_iteration_count = {WorkerType.CPU: 0, WorkerType.GPU: 0}
 
         model = get_model(self.hyperparameter.model_type)
         optimizer = optim.SGD(
@@ -39,7 +42,7 @@ class TrialState:
         self.stop_accuracy = STOP_ACCURACY
 
     def __str__(self) -> str:
-        result = f"Trial: {str(self.hyperparameter)}\n {self.status=}\n {self.stop_iteration=}"
+        result = f"{'Trial: '+str(self.id):=^40}\n Hyperparameter: {str(self.hyperparameter)}\n status: {self.status}\n iteration: {self.iteration} \n stop_iteration: {self.stop_iteration} \n{'':=^40}"
         return result
 
 
@@ -51,18 +54,24 @@ class TrialResult:
         self.history_best: Tuple[
             float, Optional[Hyperparameter], Optional[Checkpoint]
         ] = (0.0, None, None)
+        self.trial_state_history: Dict[int, Dict] = {}
+        self.trial_progress: Dict[int, TrialState] = {}
 
-    def update_train_result(
-        self,
-        iteration: int,
-        accuracy: float,
-        hyperparameter: Hyperparameter,
-        checkpoint: Checkpoint,
-    ) -> None:
-        self.table[iteration].append((accuracy, hyperparameter))
-        self.table[iteration].sort(key=lambda x: x[0], reverse=True)
-        if accuracy > self.history_best[0]:
-            self.history_best = (accuracy, hyperparameter, checkpoint)
+    def record_trial_progress(self, trial_state: TrialState) -> None:
+        self.trial_progress[trial_state.id] = trial_state
+
+    def update_trial_result(self, trial_state: TrialState) -> None:
+        self.record_trial_progress(trial_state)
+        self.table[trial_state.iteration].append(
+            (trial_state.accuracy, trial_state.hyperparameter)
+        )
+        self.table[trial_state.iteration].sort(key=lambda x: x[0], reverse=True)
+        if trial_state.accuracy > self.history_best[0]:
+            self.history_best = (
+                trial_state.accuracy,
+                trial_state.hyperparameter,
+                trial_state.checkpoint,
+            )
 
         self.display_results()
 

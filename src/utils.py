@@ -2,7 +2,7 @@ import os
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import reduce
-from typing import Any, Callable, Protocol, TypeVar
+from typing import Any, Callable, List, Protocol, TypeVar
 
 import ray
 import torch.nn as nn
@@ -41,6 +41,11 @@ class TrialStatus(Enum):
     PAUSE = auto()
 
 
+class WorkerType(Enum):
+    CPU = auto()
+    GPU = auto()
+
+
 # ╭──────────────────────────────────────────────────────────╮
 # │                       Dataclasses                        │
 # ╰──────────────────────────────────────────────────────────╯
@@ -54,6 +59,7 @@ class WorkerState:
     node_name: str
     calculate_ability: float = 0.0
     max_trials: int = 1
+    worker_type: WorkerType = WorkerType.CPU
 
 
 @dataclass
@@ -184,3 +190,30 @@ def get_model(model_type: ModelType):
 
 def get_head_node_address() -> str:
     return ray.get_runtime_context().gcs_address.split(":")[0]
+
+
+def colored_progress_bar(data: List[int], bar_width: int) -> str:
+    GREEN = "\033[92m"
+    RED = "\033[91m"
+    YELLOW = "\033[93m"
+    RESET = "\033[0m"
+
+    colors = [GREEN, RED, YELLOW]
+    total = sum(data)
+    if total == 0:
+        return " " * bar_width + " (no data)"
+
+    percentages = [x / total for x in data]
+    lengths = [int(p * bar_width) for p in percentages]
+
+    while sum(lengths) < bar_width:
+        max_idx = percentages.index(max(percentages))
+        lengths[max_idx] += 1
+
+    bar = "".join(colors[i % len(colors)] + "━" * l for i, l in enumerate(lengths))
+    bar += RESET
+
+    data_str = "/".join([f"{x:04d}" for x in data])
+    perc_str = "/".join([f"{p * 100:.2f}%" for p in percentages])
+
+    return f"{bar}  {data_str}  {perc_str}"

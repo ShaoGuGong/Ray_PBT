@@ -7,9 +7,9 @@ from typing import List
 
 import ray
 
-from .trial import TrialScheduler
+from .trial_scheduler import TrialScheduler
 from .trial_state import TrialResult, TrialState
-from .utils import Checkpoint, Hyperparameter, ModelType, TrainStepFunction
+from .utils import TrainStepFunction, WorkerType
 from .worker import generate_all_workers
 
 
@@ -66,31 +66,30 @@ class Tuner:
         )
         self.trial_result: TrialResult = TrialResult()
 
+        for trial in self.trial_states:
+            self.trial_result.record_trial_progress(trial)
+
     def run(self) -> None:
         self.logger.info("開始訓練")
         self.scheduler.run()
         self.scheduler.get_workers_logs()
+        self.logger.info(f"{len(self.trial_states)}")
         self.logger.info("結束訓練")
 
-    def update_trial_result(
-        self,
-        iteration: int,
-        accuracy: float,
-        hyperparameter: Hyperparameter,
-        checkpoint: Checkpoint,
-    ):
-        self.trial_result.update_train_result(
-            iteration, accuracy, hyperparameter, checkpoint
-        )
+    def update_trial_result(self, trial_state: TrialState):
+        self.trial_result.update_trial_result(trial_state)
+
+    def record_trial_progress(self, trial_state: TrialState):
+        self.trial_result.record_trial_progress(trial_state)
 
     def mutation(self, trial_state: TrialState) -> TrialState:
         self.logger.info(
             f"Trial {trial_state.id}: 執行mutation, Original Hyperparameter: {trial_state.hyperparameter}"
         )
-        _, hyperparameter, checkpoint = self.trial_result.get_history_best_result()
+
+        _, hyperparameter, _ = self.trial_result.get_history_best_result()
 
         mutation_hyperparameter = (
-            ("lr", random.uniform(0.001, 1)),
             ("momentum", random.uniform(0.001, 1)),
             ("batch_size", random.choice([64, 128, 256, 512, 1024])),
         )
@@ -98,17 +97,23 @@ class Tuner:
         if hyperparameter:
             trial_state.hyperparameter = replace(
                 hyperparameter,
-                **{k: v for k, v in random.sample(mutation_hyperparameter, 2)},
+                **{k: v for k, v in random.sample(mutation_hyperparameter, 1)},
             )
 
         self.logger.info(
             f"Trial {trial_state.id}: 結束mutation, New Hyperparameter: {trial_state.hyperparameter}"
         )
 
-        if checkpoint:
-            trial_state.checkpoint = checkpoint
-
         return trial_state
 
-    def get_mean_accuracy(self, iteration):
+    def get_baseline(self, iteration):
         return self.trial_result.get_mean_accuray(iteration)
+
+    def get_min_iteration_trial(self) -> int:
+        cpu_trial = [
+            trial
+            for trial in self.trial_result.trial_progress.values()
+            if trial.worker_type == WorkerType.CPU
+        ]
+        target = min(cpu_trial, key=lambda x: x.iteration)
+        return target.id

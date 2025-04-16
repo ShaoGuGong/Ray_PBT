@@ -14,7 +14,7 @@ tr = TrialResult(3, 0)
 
 for iteration in range(1, 10 + 1):
     for i in range(10):
-        tr.update_train_result(
+        tr.update_trial_result(
             iteration,
             random.uniform(0.0, 1.0),
             Hyperparameter(

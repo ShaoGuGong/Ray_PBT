@@ -6,6 +6,7 @@ import ray
 import torch
 import torch.nn as nn
 
+from src.config import STOP_ITERATION
 from src.trial_state import TrialState
 from src.tuner import Tuner
 from src.utils import Hyperparameter, ModelType, get_head_node_address
@@ -21,7 +22,7 @@ def generate_trial_states(n: int = 1) -> List[TrialState]:
                 batch_size=random.choice([64, 128, 256, 512, 1024]),
                 model_type=ModelType.RESNET_18,
             ),
-            stop_iteration=1000,
+            stop_iteration=STOP_ITERATION,
         )
         for i in range(n)
     ]
@@ -47,10 +48,10 @@ if __name__ == "__main__":
             "excludes": [".git", "test", "logs/*", "LICENSE", "README.md"],
         }
     )
-
+    trial_states = generate_trial_states(20)
     tuner = Tuner.options(
         max_concurrency=3,
         num_cpus=1,
         resources={f"node:{get_head_node_address()}": 0.01},
-    ).remote(generate_trial_states(20), train_step)
+    ).remote(trial_states, train_step)
     ray.get(tuner.run.remote())
