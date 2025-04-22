@@ -10,7 +10,7 @@ import torch.optim as optim
 from ray.actor import ActorHandle
 from torch.utils.data import DataLoader
 
-from .config import MUTATION_ITERATION
+from .config import GPU_MAX_ITERATION, MUTATION_ITERATION
 from .trial_state import TrialState
 from .utils import (Accuracy, TrainStepFunction, TrialStatus, WorkerState,
                     WorkerType, get_data_loader, get_head_node_address,
@@ -114,7 +114,7 @@ class Worker:
             tuner (ActorHandle): 負責接收訓練結果的 Actor。
         """
         self.worker_state: WorkerState = worker_state
-        self.active_trials = {}
+        self.active_trials: Dict[int, TrialState] = {}
         self.train_step = train_step
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.logger = get_worker_logger(worker_id=worker_state.id)
@@ -122,6 +122,13 @@ class Worker:
         self.tuner = tuner
         self.mutation_iteration: int = MUTATION_ITERATION
         self.interrupt_table: List[int] = []
+        self.signals: Dict[int, bool] = {}
+
+    def send_signal(self, trial_id):
+        if trial_id not in self.active_trials:
+            return
+        self.log("info", f"接收到訊號 trial: {trial_id}")
+        self.signals[trial_id] = True
 
     def assign_trial(self, trial_state: TrialState) -> Optional[TrialState]:
         """
@@ -134,9 +141,10 @@ class Worker:
             TrialState: 更新後的試驗狀態。
         """
         if len(self.active_trials) >= self.worker_state.max_trials:
-            return None
+            return trial_state
 
         self.active_trials[trial_state.id] = trial_state
+        trial_state.status = TrialStatus.RUNNING
         trial_state.worker_id = self.worker_state.id
         trial_state.worker_type = self.worker_state.worker_type
         self.log("info", f"執行中Trial: {[i for i in self.active_trials]}")
@@ -150,6 +158,9 @@ class Worker:
             int: 活躍試驗數量。
         """
         return len(self.active_trials)
+
+    def get_active_trials(self) -> List[TrialState]:
+        return list(self.active_trials.values())
 
     def get_available_slots(self) -> int:
         """
@@ -180,6 +191,8 @@ class Worker:
         model.load_state_dict(checkpoint.model_state_dict)
         model.to(self.device)
 
+        current_iteration = 0
+
         optimizer = optim.SGD(model.parameters(), lr=hyper.lr, momentum=hyper.momentum)
         optimizer.load_state_dict(checkpoint.optimzer_state_dict)
         for param_group in optimizer.param_groups:
@@ -189,6 +202,16 @@ class Worker:
         while True:
             if trial_state.accuracy > trial_state.stop_accuracy:
                 break
+
+            if trial_state.iteration >= trial_state.stop_iteration:
+                trial_state.accuracy = self.test(model, test_loader)
+                break
+
+            if self.signals.get(trial_state.id, False):
+                self.log("info", "收到回傳訊號")
+                self.pause_trial(trial_state)
+                self.signals.pop(trial_state.id, None)
+                return trial_state
 
             if trial_state.id in self.interrupt_table:
                 self.interrupt_table.remove(trial_state.id)
@@ -200,13 +223,17 @@ class Worker:
             )
 
             trial_state.iteration += 1
-
-            if trial_state.iteration >= trial_state.stop_iteration:
-                trial_state.accuracy = self.test(model, test_loader)
-                break
+            current_iteration += 1
 
             if trial_state.iteration % self.mutation_iteration:
                 continue
+
+            if (
+                self.worker_state.worker_type == WorkerType.GPU
+                and current_iteration >= GPU_MAX_ITERATION
+            ):
+                self.pause_trial(trial_state)
+                return trial_state
 
             trial_state.accuracy = self.test(model, test_loader)
 
@@ -278,7 +305,7 @@ class Worker:
             trial_state (TrialState): 試驗狀態。
         """
         self.active_trials.pop(trial_state.id)
-        trial_state.status = TrialStatus.TERMINAL
+        trial_state.status = TrialStatus.TERMINATE
 
     def pause_trial(self, trial_state: TrialState) -> None:
         """

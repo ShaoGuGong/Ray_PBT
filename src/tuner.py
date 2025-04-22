@@ -1,9 +1,10 @@
 import logging
+import math
 import os
 import random
 from dataclasses import replace
 from datetime import datetime
-from typing import List
+from typing import List, Tuple
 
 import ray
 
@@ -44,6 +45,11 @@ def get_tuner_logger() -> logging.Logger:
     return logger
 
 
+# TODO:
+# 陳舊度最舊插隊機制
+# NOTE:
+# model 的建立的時間,
+# batch_size 對於 throughput 計算
 @ray.remote
 class Tuner:
     def __init__(
@@ -78,30 +84,45 @@ class Tuner:
 
     def update_trial_result(self, trial_state: TrialState):
         self.trial_result.update_trial_result(trial_state)
+        self.logger.info(
+            f"History Best: {self.trial_result.history_best[0]} {self.trial_result.history_best[1]}\n"
+        )
 
     def record_trial_progress(self, trial_state: TrialState):
         self.trial_result.record_trial_progress(trial_state)
+        self.trial_result.display_trial_progress()
 
     def mutation(self, trial_state: TrialState) -> TrialState:
         self.logger.info(
-            f"Trial {trial_state.id}: 執行mutation, Original Hyperparameter: {trial_state.hyperparameter}"
+            f"Trial {trial_state.id}: 執行mutation, 原始超參數: {trial_state.hyperparameter}"
         )
 
         _, hyperparameter, _ = self.trial_result.get_history_best_result()
 
-        mutation_hyperparameter = (
-            ("momentum", random.uniform(0.001, 1)),
-            ("batch_size", random.choice([64, 128, 256, 512, 1024])),
-        )
-
         if hyperparameter:
+            mutation_hyperparameter = (
+                (
+                    "lr",
+                    hyperparameter.lr
+                    * 0.5
+                    * (0.0001 + 0.1)
+                    * (
+                        1
+                        + math.cos(
+                            math.pi * trial_state.iteration * trial_state.stop_iteration
+                        )
+                    ),
+                ),
+                ("momentum", random.uniform(0.001, 1)),
+                ("batch_size", random.choice([64, 128, 256, 512, 1024])),
+            )
             trial_state.hyperparameter = replace(
                 hyperparameter,
                 **{k: v for k, v in random.sample(mutation_hyperparameter, 1)},
             )
 
         self.logger.info(
-            f"Trial {trial_state.id}: 結束mutation, New Hyperparameter: {trial_state.hyperparameter}"
+            f"Trial {trial_state.id}: 結束mutation, 新超參數: {trial_state.hyperparameter}"
         )
 
         return trial_state
@@ -109,11 +130,11 @@ class Tuner:
     def get_baseline(self, iteration):
         return self.trial_result.get_mean_accuray(iteration)
 
-    def get_min_iteration_trial(self) -> int:
+    def get_min_iteration_trial(self) -> Tuple[int, int]:
         cpu_trial = [
             trial
             for trial in self.trial_result.trial_progress.values()
             if trial.worker_type == WorkerType.CPU
         ]
         target = min(cpu_trial, key=lambda x: x.iteration)
-        return target.id
+        return target.worker_id, target.id

@@ -12,3 +12,8 @@ DATASET_PATH = config.get("dataset_path", "~/Documents/dataset/")
 STOP_ACCURACY = config.get("stop_accuracy", 0.9)
 STOP_ITERATION = config.get("stop_iteration", 1000)
 MUTATION_ITERATION = config.get("mutation_iteration", 50)
+GPU_MAX_ITERATION = config.get("gpu_max_iteration", 150)
+TRIAL_RESULT_OUTPUT_PATH = config.get(
+    "trial_result_output_path",
+    os.path.expanduser("~/Documents/Ray_PBT/trial_result.output"),
+)

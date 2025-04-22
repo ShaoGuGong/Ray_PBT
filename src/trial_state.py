@@ -3,7 +3,7 @@ from typing import Dict, List, Optional, Tuple
 
 import torch.optim as optim
 
-from .config import STOP_ACCURACY
+from .config import STOP_ACCURACY, TRIAL_RESULT_OUTPUT_PATH
 from .utils import (Checkpoint, Hyperparameter, TrialStatus, WorkerType,
                     get_model)
 
@@ -47,7 +47,7 @@ class TrialState:
 
 
 class TrialResult:
-    def __init__(self, top_k: int = 1, bottom_k: int = 1) -> None:
+    def __init__(self, top_k: int = 5, bottom_k: int = 5) -> None:
         self.table: Dict[int, List[Tuple[float, Hyperparameter]]] = defaultdict(list)
         self.top_k: int = top_k
         self.bottom_k: int = bottom_k
@@ -86,53 +86,66 @@ class TrialResult:
     ) -> Tuple[float, Optional[Hyperparameter], Optional[Checkpoint]]:
         return self.history_best
 
-    def display_results(self) -> None:
+    def display_results(self, output_path: str = TRIAL_RESULT_OUTPUT_PATH) -> None:
         if not self.table:
             print("No results available")
             return
+        try:
+            with open(output_path, "w") as f:
+                f.write(f"┏{'':━^13}┳{'':━^15}┳{'':━^35}┓\n")
+                f.write(
+                    f"┃{'Iteration':^13}┃{'Accuracy':^15}┃{'Hyperparameter':^35}┃\n"
+                )
+                f.write(f"┣{'':━^4}┳{'':━^8}╋{'':━^15}╋{'':━^35}┫\n")
 
-        print(f"┏{'':━^13}┳{'':━^15}┳{'':━^35}┓")
-        print(f"┃{'Iteration':^13}┃{'Accuracy':^15}┃{'Hyperparameter':^35}┃")
-        print(f"┣{'':━^4}┳{'':━^8}╋{'':━^15}╋{'':━^35}┫")
+                for iteration, row in self.table.items():
+                    top = row[: self.top_k]
 
-        for iteration, row in self.table.items():
-            top = row[: self.top_k]
+                    bot = row[-self.bottom_k :]
+                    if len(row) <= self.top_k:
+                        bot = []
 
-            bot = row[-self.bottom_k :]
-            if len(row) <= self.top_k:
-                bot = []
+                    for data in sorted(top, key=lambda x: x[0] * -1):
+                        hyper = data[1]
+                        accuracy = data[0]
+                        output = f"lr:{hyper.lr:5.2f} momentum:{hyper.momentum:5.2f} batch:{hyper.batch_size:4}"
 
-            for data in sorted(top, key=lambda x: x[0] * -1):
-                hyper = data[1]
-                accuracy = data[0]
-                output = f"lr:{hyper.lr:5.2f} momentum:{hyper.momentum:5.2f} batch:{hyper.batch_size:4}"
+                        f.write(f"┃{'':^4}┃{'':^8}┃{accuracy:^15.6f}┃{output:^35}┃\n")
 
-                print(f"┃{'':^4}┃{'':^8}┃{accuracy:^15.6f}┃{output:^35}┃")
+                    f.write(f"\033[s\033[{(len(top)+1)//2}A\033[8C")
+                    f.write(f"{'top-'+str(self.top_k):^4}\033[u")
 
-            print(f"\033[s\033[{(len(top)+1)//2}A\033[8C", end="")
-            print(f"{'top-'+str(self.top_k):^4}\033[u", end="")
+                    if self.bottom_k == 0 or len(bot) == 0:
+                        f.write(f"\033[s\033[{(len(top)+len(bot)+2)//2}A\033[1C")
+                        f.write(f"{iteration:^4}\033[u")
+                        f.write(f"┣{'':━^4}╋{'':━^8}╋{'':━^15}╋{'':━^35}┫\n")
+                        continue
 
-            if self.bottom_k == 0 or len(bot) == 0:
-                print(f"\033[s\033[{(len(top)+len(bot)+2)//2}A\033[1C", end="")
-                print(f"{iteration:^4}\033[u", end="")
-                print(f"┣{'':━^4}╋{'':━^8}╋{'':━^15}╋{'':━^35}┫")
-                continue
+                    f.write(f"┃{'':^4}┣{'':━^8}╋{'':━^15}╋{'':━^35}┫\n")
+                    for data in sorted(bot, key=lambda x: x[0] * -1):
+                        hyper = data[1]
+                        accuracy = data[0]
+                        output = f"lr:{hyper.lr:5.2f} momentum:{hyper.momentum:5.2f} batch:{hyper.batch_size:4}"
 
-            print(f"┃{'':^4}┣{'':━^8}╋{'':━^15}╋{'':━^35}┫")
-            for data in sorted(bot, key=lambda x: x[0] * -1):
-                hyper = data[1]
-                accuracy = data[0]
-                output = f"lr:{hyper.lr:5.2f} momentum:{hyper.momentum:5.2f} batch:{hyper.batch_size:4}"
+                        f.write(f"┃{'':^4}┃{'':^8}┃{accuracy:^15.6f}┃{output:^35}┃\n")
+                    f.write(f"\033[s\033[{(len(bot)+1)//2}A\033[8C")
+                    f.write(f"{'bot-'+str(self.bottom_k):^4}\033[u")
+                    f.write(f"\033[s\033[{(len(top)+len(bot)+2)//2}A\033[1C")
+                    f.write(f"{iteration:^4}\033[u")
+                    f.write(f"┣{'':━^4}╋{'':━^8}╋{'':━^15}╋{'':━^35}┫\n")
+                f.write(f"\033[A┗{'':━^4}┻{'':━^8}┻{'':━^15}┻{'':━^35}┛\n")
 
-                print(f"┃{'':^4}┃{'':^8}┃{accuracy:^15.6f}┃{output:^35}┃")
-            print(f"\033[s\033[{(len(bot)+1)//2}A\033[8C", end="")
-            print(f"{'bot-'+str(self.bottom_k):^4}\033[u", end="")
-            print(f"\033[s\033[{(len(top)+len(bot)+2)//2}A\033[1C", end="")
-            print(f"{iteration:^4}\033[u", end="")
-            print(f"┣{'':━^4}╋{'':━^8}╋{'':━^15}╋{'':━^35}┫")
-        print(f"\033[A┗{'':━^4}┻{'':━^8}┻{'':━^15}┻{'':━^35}┛")
+                f.write(
+                    f"History Best: {self.history_best[0]} {self.history_best[1]}\n"
+                )
+        except Exception as e:
+            print(f"{e}")
 
-        print(f"History Best: {self.history_best[0]} {self.history_best[1]}")
+    def display_trial_progress(self):
+        for i in self.trial_progress.values():
+            print(
+                f"Trial:{i.id}, {i.status}, Worker:{i.worker_id}, {i.hyperparameter}, iteration:{i.iteration}, accuracy:{i.accuracy:.3f}"
+            )
 
     def to_json(self) -> str:
         import json

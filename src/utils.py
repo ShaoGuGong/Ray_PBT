@@ -33,12 +33,18 @@ class ModelType(Enum):
     RESNET_18 = auto()
     RESNET_50 = auto()
 
+    def __str__(self):
+        return self.name
+
 
 class TrialStatus(Enum):
     RUNNING = auto()
     PENDING = auto()
-    TERMINAL = auto()
+    TERMINATE = auto()
     PAUSE = auto()
+
+    def __str__(self):
+        return self.name
 
 
 class WorkerType(Enum):
@@ -68,6 +74,9 @@ class Hyperparameter:
     momentum: float
     batch_size: int
     model_type: ModelType
+
+    def __str__(self) -> str:
+        return f"Hyperparameter(lr:{self.lr:.3f}, momentum:{self.momentum:.3f}, batch_size:{self.batch_size:4d}, model_type:{self.model_type})"
 
 
 @dataclass
