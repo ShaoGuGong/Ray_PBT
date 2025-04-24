@@ -3,7 +3,8 @@ from typing import Dict, List, Optional, Tuple
 
 import torch.optim as optim
 
-from .config import STOP_ACCURACY, TRIAL_RESULT_OUTPUT_PATH
+from .config import (STOP_ACCURACY, TRIAL_PROGRESS_OUTPUT_PATH,
+                     TRIAL_RESULT_OUTPUT_PATH)
 from .utils import (Checkpoint, Hyperparameter, TrialStatus, WorkerType,
                     get_model)
 
@@ -141,11 +142,41 @@ class TrialResult:
         except Exception as e:
             print(f"{e}")
 
-    def display_trial_progress(self):
-        for i in self.trial_progress.values():
-            print(
-                f"Trial:{i.id}, {i.status}, Worker:{i.worker_id}, {i.hyperparameter}, iteration:{i.iteration}, accuracy:{i.accuracy:.3f}"
-            )
+    def display_trial_progress(
+        self, output_path: str = TRIAL_PROGRESS_OUTPUT_PATH
+    ) -> None:
+        try:
+            with open(output_path, "w") as f:
+                f.write(f"┏{'':━^7}┳{'':━^11}┳{'':━^11}┳{'':━^43}┳{'':━^7}┳{'':━^7}┓\n")
+                f.write(
+                    f"┃{'':^7}┃{'':^11}┃{'Worker':^11}┃{'Hyparameter':^43}┃{'':^7}┃{'':^7}┃\n"
+                )
+                f.write(
+                    f"┃{'Trial':^7}┃{'Status':^11}┣{'':━^4}┳{'':━^6}╋{'':━^7}┳{'':━^10}┳{'':━^12}┳{'':━^11}┫{'Iter':^7}┃{'Acc':^7}┃\n"
+                )
+                f.write(
+                    f"┃{'':^7}┃{'':^11}┃{'ID':^4}┃{'TYPE':^6}┃{'lr':^7}┃{'momentum':^10}┃{'batch size':^12}┃{'Model':^11}┃{'':^7}┃{'':^7}┃\n"
+                )
+                f.write(
+                    f"┣{'':━^7}╋{'':━^11}╋{'':━^4}╋{'':━^6}╋{'':━^7}╋{'':━^10}╋{'':━^12}╋{'':━^11}╋{'':━^7}╋{'':━^7}┫\n"
+                )
+
+                for i in self.trial_progress.values():
+                    worker_type = "None"
+                    if i.worker_type == WorkerType.CPU:
+                        worker_type = "CPU"
+                    elif i.worker_type == WorkerType.GPU:
+                        worker_type = "GPU"
+                    h = i.hyperparameter
+                    f.write(
+                        f"┃{i.id:>7}┃{i.status:^11}┃{i.worker_id:>4}┃{worker_type:^6}┃{h.lr:>7.3f}┃{h.momentum:>10.3f}┃{h.batch_size:>12}┃{h.model_type:^11}┃{i.iteration:>7}┃{i.accuracy:>7.3f}┃\n"
+                    )
+                f.write(
+                    f"┗{'':━^7}┻{'':━^11}┻{'':━^4}┻{'':━^6}┻{'':━^7}┻{'':━^10}┻{'':━^12}┻{'':━^11}┻{'':━^7}┻{'':━^7}┛\n"
+                )
+
+        except Exception as e:
+            print(f"{e}")
 
     def to_json(self) -> str:
         import json

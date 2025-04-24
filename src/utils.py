@@ -1,8 +1,9 @@
 import os
+import zipfile
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import reduce
-from typing import Any, Callable, List, Protocol, TypeVar
+from typing import Any, Callable, List, Optional, Protocol, TypeVar
 
 import ray
 import torch.nn as nn
@@ -50,6 +51,12 @@ class TrialStatus(Enum):
 class WorkerType(Enum):
     CPU = auto()
     GPU = auto()
+
+
+class DatasetType(Enum):
+    CIFAR10 = auto()
+    CIFAR100 = auto()
+    IMAGENET = auto()
 
 
 # ╭──────────────────────────────────────────────────────────╮
@@ -109,15 +116,20 @@ def pipe(*functions: Composeable) -> Composeable:
 
 
 def get_data_loader(
-    model_type: ModelType,
     batch_size: int = 64,
-    train_transform=None,
-    test_transform=None,
-    data_dir=DATASET_PATH,
+    train_transform: Optional[transforms.Compose] = None,
+    test_transform: Optional[transforms.Compose] = None,
+    data_dir: str = DATASET_PATH,
 ) -> tuple:
     data_dir = os.path.expanduser(data_dir)
     if not os.path.exists(data_dir):
         os.makedirs(data_dir)
+
+    if not os.path.exists(os.path.join(data_dir, "cifar-10-batches-py")):
+        print(f"{os.path.join(data_dir, 'cifar-10-batches-py')} 不存在")
+        torchvision.datasets.CIFAR10(
+            root=data_dir, train=True, download=True, transform=None
+        )
 
     if train_transform is None:
         train_transform = transforms.Compose(
@@ -141,48 +153,22 @@ def get_data_loader(
             ]
         )
 
-    if not os.path.exists(os.path.join(data_dir, "cifar-10-batches-py")):
-        print(f"{os.path.join(data_dir, 'cifar-10-batches-py')} 不存在")
+    train_loader = DataLoader(
         torchvision.datasets.CIFAR10(
-            root=data_dir, train=True, download=True, transform=None
-        )
+            root=data_dir, train=True, download=False, transform=train_transform
+        ),
+        batch_size=batch_size,
+        shuffle=True,
+    )
 
-    if model_type == ModelType.RESNET_18:
-        train_loader = DataLoader(
-            torchvision.datasets.CIFAR10(
-                root=data_dir, train=True, download=False, transform=train_transform
-            ),
-            batch_size=batch_size,
-            shuffle=True,
-        )
-        test_loader = DataLoader(
-            torchvision.datasets.CIFAR10(
-                root=data_dir, train=False, download=False, transform=test_transform
-            ),
-            batch_size=batch_size,
-            shuffle=False,
-        )
-        return train_loader, test_loader
-
-    elif model_type == ModelType.RESNET_50:
-        train_loader = DataLoader(
-            torchvision.datasets.CIFAR100(
-                root=data_dir, train=True, download=False, transform=train_transform
-            ),
-            batch_size=batch_size,
-            shuffle=True,
-        )
-
-        test_loader = DataLoader(
-            torchvision.datasets.CIFAR100(
-                root=data_dir, train=False, download=False, transform=test_transform
-            ),
-            batch_size=batch_size,
-            shuffle=False,
-        )
-        return train_loader, test_loader
-
-    raise ValueError("`model_type` must be in ModelType")
+    test_loader = DataLoader(
+        torchvision.datasets.CIFAR10(
+            root=data_dir, train=False, download=False, transform=test_transform
+        ),
+        batch_size=batch_size,
+        shuffle=False,
+    )
+    return train_loader, test_loader
 
 
 def get_model(model_type: ModelType):
@@ -226,3 +212,8 @@ def colored_progress_bar(data: List[int], bar_width: int) -> str:
     perc_str = "/".join([f"{p * 100:.2f}%" for p in percentages])
 
     return f"{bar}  {data_str}  {perc_str}"
+
+
+def unzip_file(zip_path: str, extract_to: str) -> None:
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(extract_to)

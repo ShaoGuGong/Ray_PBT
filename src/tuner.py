@@ -2,6 +2,7 @@ import logging
 import math
 import os
 import random
+import zipfile
 from dataclasses import replace
 from datetime import datetime
 from typing import List, Tuple
@@ -27,7 +28,7 @@ def get_tuner_logger() -> logging.Logger:
 
         formatter = logging.Formatter(
             "[%(asctime)s] %(levelname)s TUNER -- %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
+            # datefmt="%Y-%m-%d %H:%M:%S",
         )
 
         stream_handler = logging.StreamHandler()
@@ -35,9 +36,7 @@ def get_tuner_logger() -> logging.Logger:
         stream_handler.setFormatter(formatter)
         logger.addHandler(stream_handler)
 
-        file_handler = logging.FileHandler(
-            os.path.join(log_dir, f"trial_scheduler.log")
-        )
+        file_handler = logging.FileHandler(os.path.join(log_dir, f"tuner.log"))
         file_handler.setLevel(logging.DEBUG)  # 記錄所有級別的日誌
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
@@ -45,8 +44,6 @@ def get_tuner_logger() -> logging.Logger:
     return logger
 
 
-# TODO:
-# 陳舊度最舊插隊機制
 # NOTE:
 # model 的建立的時間,
 # batch_size 對於 throughput 計算
@@ -85,7 +82,7 @@ class Tuner:
     def update_trial_result(self, trial_state: TrialState):
         self.trial_result.update_trial_result(trial_state)
         self.logger.info(
-            f"History Best: {self.trial_result.history_best[0]} {self.trial_result.history_best[1]}\n"
+            f"History Best: {self.trial_result.history_best[0]} {self.trial_result.history_best[1]}"
         )
 
     def record_trial_progress(self, trial_state: TrialState):
@@ -138,3 +135,26 @@ class Tuner:
         ]
         target = min(cpu_trial, key=lambda x: x.iteration)
         return target.worker_id, target.id
+
+    def get_zipped_log(self) -> bytes:
+        log_dir = None
+
+        for handler in self.logger.handlers:
+            if isinstance(handler, logging.FileHandler):
+                log_dir = os.path.dirname(handler.baseFilename)  # 取得資料夾路徑
+                break
+        if log_dir is None:
+            raise FileNotFoundError("log_dir not found.")
+
+        zip_path = "./logs.zip"
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for root, dirs, files in os.walk(log_dir):
+                for file in files:
+                    abs_file = os.path.join(root, file)
+                    rel_path = os.path.relpath(abs_file, log_dir)
+                    zf.write(abs_file, arcname=rel_path)
+
+        with open(zip_path, "rb") as f:
+            zip_byte = f.read()
+
+        return zip_byte

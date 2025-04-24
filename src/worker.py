@@ -68,7 +68,7 @@ def get_worker_logger(worker_id: int) -> logging.Logger:
 
         formatter = WorkerLoggerFormatter(
             "[%(asctime)s] %(levelname)s %(worker_type)s WORKER_ID: %(worker_id)s TRIAL_ID: %(trial_id)s -- %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
+            # datefmt="%Y-%m-%d %H:%M:%S",
         )
 
         stream_handler = logging.StreamHandler()
@@ -121,14 +121,14 @@ class Worker:
         self.log("info", "初始化完成")
         self.tuner = tuner
         self.mutation_iteration: int = MUTATION_ITERATION
-        self.interrupt_table: List[int] = []
-        self.signals: Dict[int, bool] = {}
+        self.interrupt_set: set = set()
 
-    def send_signal(self, trial_id):
-        if trial_id not in self.active_trials:
+    def send_signal(self, trial_id: int) -> None:
+        if trial_id not in self.active_trials.keys():
+            self.log("info", f"TRIAL_ID: {trial_id}不存在, {self.active_trials.keys()}")
             return
         self.log("info", f"接收到訊號 trial: {trial_id}")
-        self.signals[trial_id] = True
+        self.interrupt_set.add(trial_id)
 
     def assign_trial(self, trial_state: TrialState) -> Optional[TrialState]:
         """
@@ -147,6 +147,7 @@ class Worker:
         trial_state.status = TrialStatus.RUNNING
         trial_state.worker_id = self.worker_state.id
         trial_state.worker_type = self.worker_state.worker_type
+        ray.get(self.tuner.record_trial_progress.remote(trial_state))
         self.log("info", f"執行中Trial: {[i for i in self.active_trials]}")
         return self.train(trial_state)
 
@@ -185,7 +186,7 @@ class Worker:
 
         hyper = trial_state.hyperparameter
         checkpoint = trial_state.checkpoint
-        train_loader, test_loader = get_data_loader(hyper.model_type, hyper.batch_size)
+        train_loader, test_loader = get_data_loader(hyper.batch_size)
 
         model = get_model(hyper.model_type)
         model.load_state_dict(checkpoint.model_state_dict)
@@ -207,15 +208,18 @@ class Worker:
                 trial_state.accuracy = self.test(model, test_loader)
                 break
 
-            if self.signals.get(trial_state.id, False):
-                self.log("info", "收到回傳訊號")
+            if (
+                self.worker_state.worker_type == WorkerType.GPU
+                and current_iteration >= GPU_MAX_ITERATION
+            ):
+                self.log("info", "已達到 GPU_MAX_ITERATION 次數")
                 self.pause_trial(trial_state)
-                self.signals.pop(trial_state.id, None)
                 return trial_state
 
-            if trial_state.id in self.interrupt_table:
-                self.interrupt_table.remove(trial_state.id)
+            if trial_state.id in self.interrupt_set:
+                self.log("info", "收到回傳訊號")
                 self.pause_trial(trial_state)
+                self.interrupt_set.remove(trial_state.id)
                 return trial_state
 
             self.train_step(
@@ -223,17 +227,11 @@ class Worker:
             )
 
             trial_state.iteration += 1
+            trial_state.device_iteration_count[self.worker_state.worker_type] += 1
             current_iteration += 1
 
             if trial_state.iteration % self.mutation_iteration:
                 continue
-
-            if (
-                self.worker_state.worker_type == WorkerType.GPU
-                and current_iteration >= GPU_MAX_ITERATION
-            ):
-                self.pause_trial(trial_state)
-                return trial_state
 
             trial_state.accuracy = self.test(model, test_loader)
 

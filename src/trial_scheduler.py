@@ -8,7 +8,7 @@ from typing import Any, List, Optional, Protocol
 import ray
 from ray import ObjectRef
 from ray.actor import ActorHandle
-from torch.nn.modules import activation
+from torch.cuda import is_available
 
 from .trial_state import TrialState
 from .utils import TrialStatus, WorkerType, colored_progress_bar
@@ -36,13 +36,13 @@ def round_robin_strategy(
     available_futures = [worker.get_available_slots.remote() for worker in gpu_workers]
 
     available_gpu_workers = [
-        worker
+        (worker, available_slots)
         for worker, available_slots in zip(gpu_workers, ray.get(available_futures))
         if available_slots > 0
     ]
 
     if available_gpu_workers:
-        worker = next(iter(available_gpu_workers))
+        worker = max(available_gpu_workers, key=lambda x: x[1])[0]
         trial_state = min(pending_trial_states, key=lambda x: x.iteration)
 
         pending_trial_states.remove(trial_state)
@@ -73,15 +73,15 @@ def round_robin_strategy(
 def gpu_first_strategy(
     gpu_workers: List[ActorHandle],
     cpu_workers: List[ActorHandle],
-    *args: Any,
+    **kargs: Any,
 ) -> Optional[ObjectRef]:
-
+    logger = kargs["logger"]
     available_futures = [worker.get_available_slots.remote() for worker in gpu_workers]
 
     available_gpu_workers = [
         worker
-        for worker, is_available in zip(gpu_workers, ray.get(available_futures))
-        if is_available
+        for worker, available_slots in zip(gpu_workers, ray.get(available_futures))
+        if available_slots > 0
     ]
 
     if not available_gpu_workers:
@@ -91,12 +91,13 @@ def gpu_first_strategy(
 
     running_cpu_workers = [
         (worker, min(activate_trials, key=lambda x: x.iteration))
-        for worker, activate_trials in zip(gpu_workers, ray.get(available_futures))
+        for worker, activate_trials in zip(cpu_workers, ray.get(available_futures))
         if len(activate_trials) > 0
     ]
 
     if running_cpu_workers:
         worker, trial_state = min(running_cpu_workers, key=lambda x: x[1].iteration)
+        logger.info(f"對 Trial {trial_state.id} 執行搶奪")
         ray.get(worker.send_signal.remote(trial_state.id))
 
 
@@ -120,7 +121,7 @@ def get_trial_scheduler_logger() -> logging.Logger:
 
         formatter = logging.Formatter(
             "[%(asctime)s] %(levelname)s TRIAL_SCHEDULER -- %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
+            # datefmt="%Y-%m-%d %H:%M:%S",
         )
 
         stream_handler = logging.StreamHandler()
@@ -217,8 +218,7 @@ class TrialScheduler:
                 self.running_futures.append(future)
             return self.running_futures
 
-        self.logger.info(f"⏳ 等待訓練任務列表長度：0, 執行 Trial 搶奪")
-        gpu_first_strategy(self.gpu_workers, self.cpu_workers)
+        gpu_first_strategy(self.gpu_workers, self.cpu_workers, logger=self.logger)
 
     def run(self):
         """
@@ -244,6 +244,10 @@ class TrialScheduler:
                 loop.run_until_complete(self.handle_done_futures(done_futures))
                 # asyncio.create_task(self.handle_done_futures(done_futures))
 
+        self.print_iteration_count()
+        self.logger.info("🎉 所有 Trial 訓練完成！")
+
+    def print_iteration_count(self) -> None:
         iteration_counts = [
             (i.id, i.device_iteration_count) for i in self.completed_trial_states
         ]
@@ -268,8 +272,6 @@ class TrialScheduler:
                 40,
             ),
         )
-
-        self.logger.info("🎉 所有 Trial 訓練完成！")
 
     def get_workers_logs(self) -> None:
         """
