@@ -1,14 +1,52 @@
-from collections import defaultdict
-from typing import List
+import logging
+import math
+import os
+import random
+import zipfile
+from dataclasses import replace
+from datetime import datetime
+from typing import List, Tuple
 
 import ray
 
-from trial import TrialScheduler
-from trial_state import TrialState
-from utils import TrainStepFunction
-from worker import generate_all_workers
+from .trial_scheduler import TrialScheduler
+from .trial_state import TrialResult, TrialState
+from .utils import TrainStepFunction, WorkerType
+from .worker import generate_all_workers
 
 
+def get_tuner_logger() -> logging.Logger:
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    log_dir = os.path.join(os.getcwd(), "logs/", timestamp)
+    os.makedirs(log_dir, exist_ok=True)
+
+    logger = logging.getLogger(f"Tuner")
+
+    if not logger.handlers:
+        logger.setLevel(logging.DEBUG)  # 或者選擇更合適的級別
+
+        formatter = logging.Formatter(
+            "[%(asctime)s] %(levelname)s TUNER -- %(message)s",
+            # datefmt="%Y-%m-%d %H:%M:%S",
+        )
+
+        stream_handler = logging.StreamHandler()
+        stream_handler.setLevel(logging.INFO)  # 只顯示 INFO 級別以上的訊息
+        stream_handler.setFormatter(formatter)
+        logger.addHandler(stream_handler)
+
+        file_handler = logging.FileHandler(os.path.join(log_dir, f"tuner.log"))
+        file_handler.setLevel(logging.DEBUG)  # 記錄所有級別的日誌
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+
+    return logger
+
+
+# NOTE:
+# model 的建立的時間,
+# batch_size 對於 throughput 計算
 @ray.remote
 class Tuner:
     def __init__(
@@ -17,33 +55,106 @@ class Tuner:
         train_step: TrainStepFunction,
     ) -> None:
         self.trial_states = trial_states
+        self.logger = get_tuner_logger()
 
-        print(f"總共{len(trial_states)} 個 Trial")
-        print(*[t.hyperparameter for t in trial_states], sep="\n")
+        self.logger.info(f"總共{len(trial_states)} 個 Trial")
+        self.logger.info("\n".join([str(t.hyperparameter) for t in trial_states]))
 
         self.workers = generate_all_workers(
             ray.get_runtime_context().current_actor, train_step=train_step
         )
-        self.scheduler = TrialScheduler(self.workers, trial_states)
-        self.accuracy_table = defaultdict(float)
+
+        self.scheduler: TrialScheduler = TrialScheduler(
+            ray.get_runtime_context().current_actor, self.workers, trial_states
+        )
+        self.trial_result: TrialResult = TrialResult()
+
+        for trial in self.trial_states:
+            self.trial_result.record_trial_progress(trial)
 
     def run(self) -> None:
-        print("Tuner Start")
+        self.logger.info("開始訓練")
         self.scheduler.run()
         self.scheduler.get_workers_logs()
-        print("Tuner End")
+        self.logger.info(f"{len(self.trial_states)}")
+        self.logger.info("結束訓練")
 
-    def record_accuracy(self, accuracy: float, iteration: int) -> None:
-        self.accuracy_table[iteration] = max(self.accuracy_table[iteration], accuracy)
-        self.print_accuracy_table()
+    def update_trial_result(self, trial_state: TrialState):
+        self.trial_result.update_trial_result(trial_state)
+        self.logger.info(
+            f"History Best: {self.trial_result.history_best[0]} {self.trial_result.history_best[1]}"
+        )
 
-    def get_accuracy(self, iteration: int) -> float:
-        return self.accuracy_table[iteration]
+    def record_trial_progress(self, trial_state: TrialState):
+        self.trial_result.record_trial_progress(trial_state)
+        self.trial_result.display_trial_progress()
 
-    def print_accuracy_table(self) -> None:
-        print("┏━━━━━━━━━━━┳━━━━━━━━━━┓")
-        print("┃ Iteration ┃ Accuracy ┃")
-        print("┡━━━━━━━━━━━╇━━━━━━━━━━┩")
-        for k, v in self.accuracy_table.items():
-            print(f"│ {k:9d} │ {v:8.4f} │")
-        print("└───────────┴──────────┘")
+    def mutation(self, trial_state: TrialState) -> TrialState:
+        self.logger.info(
+            f"Trial {trial_state.id}: 執行mutation, 原始超參數: {trial_state.hyperparameter}"
+        )
+
+        _, hyperparameter, _ = self.trial_result.get_history_best_result()
+
+        if hyperparameter:
+            mutation_hyperparameter = (
+                (
+                    "lr",
+                    hyperparameter.lr
+                    * 0.5
+                    * (0.0001 + 0.1)
+                    * (
+                        1
+                        + math.cos(
+                            math.pi * trial_state.iteration * trial_state.stop_iteration
+                        )
+                    ),
+                ),
+                ("momentum", random.uniform(0.001, 1)),
+                ("batch_size", random.choice([64, 128, 256, 512, 1024])),
+            )
+            trial_state.hyperparameter = replace(
+                hyperparameter,
+                **{k: v for k, v in random.sample(mutation_hyperparameter, 1)},
+            )
+
+        self.logger.info(
+            f"Trial {trial_state.id}: 結束mutation, 新超參數: {trial_state.hyperparameter}"
+        )
+
+        return trial_state
+
+    def get_baseline(self, iteration):
+        return self.trial_result.get_mean_accuray(iteration)
+
+    def get_min_iteration_trial(self) -> Tuple[int, int]:
+        cpu_trial = [
+            trial
+            for trial in self.trial_result.trial_progress.values()
+            if trial.worker_type == WorkerType.CPU
+        ]
+        target = min(cpu_trial, key=lambda x: x.iteration)
+        return target.worker_id, target.id
+
+    def get_zipped_log(self) -> bytes:
+        log_dir = None
+
+        for handler in self.logger.handlers:
+            if isinstance(handler, logging.FileHandler):
+                log_dir = os.path.dirname(handler.baseFilename)  # 取得資料夾路徑
+                break
+        if log_dir is None:
+            raise FileNotFoundError("log_dir not found.")
+
+        zip_path = "./logs.zip"
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for root, dirs, files in os.walk(log_dir):
+                for file in files:
+                    abs_file = os.path.join(root, file)
+                    rel_path = os.path.relpath(abs_file, log_dir)
+                    zf.write(abs_file, arcname=rel_path)
+
+        with open(zip_path, "rb") as f:
+            zip_byte = f.read()
+
+        return zip_byte

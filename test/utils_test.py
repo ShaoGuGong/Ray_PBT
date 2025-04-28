@@ -5,9 +5,8 @@ from pprint import pp
 import ray
 from numpy import random
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
-
-from utils import compose, pipe
+import src.config
+from src.utils import colored_progress_bar, compose, pipe
 
 
 def add(x):
@@ -19,5 +18,6 @@ def mul(x):
 
 
 if __name__ == "__main__":
-    print(compose(add, mul)(3))
-    print(pipe(add, mul)(3))
+    x = [[i, 20 - i] for i in range(20)]
+    for i in x:
+        print(colored_progress_bar(i, 20))

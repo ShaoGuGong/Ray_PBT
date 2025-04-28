@@ -1,21 +1,25 @@
 import logging
 import os
 import random
-from typing import Dict, List, Union
+from typing import Dict, List, Optional, Union
 
 import ray
 import torch
+import torch.nn as nn
 import torch.optim as optim
 from ray.actor import ActorHandle
+from torch.utils.data import DataLoader
 
-from trial_state import TrialState
-from utils import (Accuracy, TrainStepFunction, TrialStatus, WorkerState,
-                   get_data_loader, get_head_node_address, get_model)
+from .config import GPU_MAX_ITERATION, MUTATION_ITERATION
+from .trial_state import TrialState
+from .utils import (Accuracy, TrainStepFunction, TrialStatus, WorkerState,
+                    WorkerType, get_data_loader, get_head_node_address,
+                    get_model)
 
 
 class WorkerLoggerFormatter(logging.Formatter):
     """
-    自定義的日誌格式化器，為日誌添加 worker_id 和 trial_id。
+    自訂的日誌格式器，用於在日誌中加入 worker_id 和 trial_id。
 
     Attributes:
         None
@@ -23,14 +27,21 @@ class WorkerLoggerFormatter(logging.Formatter):
 
     def format(self, record):
         """
-        格式化日誌信息，並添加 worker_id 和 trial_id。
+        格式化日誌紀錄，加入 worker_id 和 trial_id。
 
         Args:
-            record (logging.LogRecord): 日誌記錄。
+            record (logging.LogRecord): 日誌紀錄。
 
         Returns:
-            str: 格式化的日誌消息。
+            str: 格式化後的日誌訊息。
         """
+
+        worker_type = getattr(record, "worker_type", WorkerType.CPU)
+        if worker_type == WorkerType.GPU:
+            record.worker_type = "GPU"
+        elif worker_type == WorkerType.CPU:
+            record.worker_type = "CPU"
+
         record.worker_id = getattr(record, "worker_id", "N/A")
         record.trial_id = getattr(record, "trial_id", "N/A")
         return super().format(record)
@@ -38,44 +49,37 @@ class WorkerLoggerFormatter(logging.Formatter):
 
 def get_worker_logger(worker_id: int) -> logging.Logger:
     """
-    創建並返回一個針對特定 worker_id 的 logger，支持終端輸出與文件寫入。
+    建立並回傳指定 worker_id 的 logger，支援終端輸出與檔案寫入。
 
     Args:
-        worker_id (int): 工作者的唯一 ID。
+        worker_id (int): Worker 的唯一識別碼。
 
     Returns:
-        logging.Logger: 配置好的 logger。
+        logging.Logger: 設定完成的 logger。
     """
 
-    # 確保 logs 目錄存在
     log_dir = os.path.join(os.getcwd(), "logs")
     os.makedirs(log_dir, exist_ok=True)
 
-    # 使用 worker_id 創建唯一的 logger 名稱
     logger = logging.getLogger(f"worker-{worker_id}")
 
-    # 防止重複添加 handler
     if not logger.handlers:
-        # 設定 logger 的最基本級別
-        logger.setLevel(logging.DEBUG)  # 或者選擇更合適的級別
+        logger.setLevel(logging.DEBUG)
 
-        # 統一格式設定
         formatter = WorkerLoggerFormatter(
-            "[%(asctime)s] %(levelname)s WORKER_ID: %(worker_id)s TRIAL_ID: %(trial_id)s -- %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
+            "[%(asctime)s] %(levelname)s %(worker_type)s WORKER_ID: %(worker_id)s TRIAL_ID: %(trial_id)s -- %(message)s",
+            # datefmt="%Y-%m-%d %H:%M:%S",
         )
 
-        # 設定 stream handler (只顯示在終端)
         stream_handler = logging.StreamHandler()
-        stream_handler.setLevel(logging.INFO)  # 只顯示 INFO 級別以上的訊息
+        stream_handler.setLevel(logging.INFO)
         stream_handler.setFormatter(formatter)
         logger.addHandler(stream_handler)
 
-        # 設定 file handler (將日誌寫入文件)
         file_handler = logging.FileHandler(
             os.path.join(log_dir, f"worker-{worker_id}.log")
         )
-        file_handler.setLevel(logging.DEBUG)  # 記錄所有級別的日誌
+        file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
 
@@ -85,14 +89,14 @@ def get_worker_logger(worker_id: int) -> logging.Logger:
 @ray.remote
 class Worker:
     """
-    代表一個工作者節點的類，負責訓練一個試驗並更新其結果。
+    表示一個 worker 節點，負責訓練與回報試驗結果。
 
     Attributes:
-        worker_state (WorkerState): 工作者的狀態信息。
-        active_trials (dict): 活躍的試驗字典，鍵為試驗 ID，值為試驗狀態。
-        train_step (TrainStepFunction): 訓練步驟函數。
-        device (torch.device): 訓練所使用的設備（CUDA 或 CPU）。
-        logger (logging.Logger): 用於記錄訓練過程的 logger。
+        worker_state (WorkerState): Worker 的狀態資訊。
+        active_trials (dict): 活躍試驗的字典。
+        train_step (TrainStepFunction): 執行訓練步驟的函式。
+        device (torch.device): 使用的設備（CPU 或 GPU）。
+        logger (logging.Logger): 負責日誌紀錄。
     """
 
     def __init__(
@@ -102,78 +106,93 @@ class Worker:
         tuner: ActorHandle,
     ) -> None:
         """
-        初始化 Worker 類，並設置相關屬性。
+        初始化 Worker，設定狀態與參數。
 
         Args:
-            worker_state (WorkerState): 工作者的狀態信息。
-            train_result (ActorHandle): 用於更新訓練結果的 Actor。
-            train_step (TrainStepFunction): 訓練步驟函數。
+            worker_state (WorkerState): Worker 的狀態資訊。
+            train_step (TrainStepFunction): 訓練步驟函式。
+            tuner (ActorHandle): 負責接收訓練結果的 Actor。
         """
-
-        self.worker_state = worker_state
-        self.active_trials = {}
+        self.worker_state: WorkerState = worker_state
+        self.active_trials: Dict[int, TrialState] = {}
         self.train_step = train_step
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.logger = get_worker_logger(worker_id=worker_state.id)
-        self.logger.info("初始化完成", extra={"worker_id": self.worker_state.id})
+        self.log("info", "初始化完成")
         self.tuner = tuner
+        self.mutation_iteration: int = MUTATION_ITERATION
+        self.interrupt_set: set = set()
 
-    def assign_trial(self, trial_state: TrialState) -> TrialState:
+    def send_signal(self, trial_id: int) -> None:
+        if trial_id not in self.active_trials.keys():
+            self.log("info", f"TRIAL_ID: {trial_id}不存在, {self.active_trials.keys()}")
+            return
+        self.log("info", f"接收到訊號 trial: {trial_id}")
+        self.interrupt_set.add(trial_id)
+
+    def assign_trial(self, trial_state: TrialState) -> Optional[TrialState]:
         """
-        分配一個試驗給這個工作者，並開始訓練。
+        將試驗分配給該 worker 並開始訓練。
 
         Args:
-            trial_state (TrialState): 試驗的狀態。
+            trial_state (TrialState): 試驗狀態。
 
         Returns:
             TrialState: 更新後的試驗狀態。
         """
+        if len(self.active_trials) >= self.worker_state.max_trials:
+            return trial_state
 
         self.active_trials[trial_state.id] = trial_state
+        trial_state.status = TrialStatus.RUNNING
         trial_state.worker_id = self.worker_state.id
+        trial_state.worker_type = self.worker_state.worker_type
+        ray.get(self.tuner.record_trial_progress.remote(trial_state))
+        self.log("info", f"執行中Trial: {[i for i in self.active_trials]}")
         return self.train(trial_state)
 
     def get_active_trials_nums(self) -> int:
         """
-        獲取目前活躍的試驗數量。
+        取得目前活躍試驗的數量。
 
         Returns:
             int: 活躍試驗數量。
         """
         return len(self.active_trials)
 
-    def has_available_slots(self) -> bool:
+    def get_active_trials(self) -> List[TrialState]:
+        return list(self.active_trials.values())
+
+    def get_available_slots(self) -> int:
         """
-        判斷這個工作者是否還有可用的插槽來處理更多的試驗。
+        取得可供分配的新試驗插槽數。
 
         Returns:
-            bool: 如果有可用插槽則返回 True，否則返回 False。
+            int: 可分配試驗的插槽數。
         """
-        return len(self.active_trials) < self.worker_state.max_trials
+        return self.worker_state.max_trials - len(self.active_trials)
 
     def train(self, trial_state: TrialState) -> TrialState:
         """
-        執行一個訓練過程，並更新試驗狀態。
+        執行試驗的訓練流程。
 
         Args:
-            trial_state (TrialState): 試驗的狀態。
+            trial_state (TrialState): 試驗狀態。
 
         Returns:
-            TrialState: 更新後的試驗狀態。
+            TrialState: 訓練後的試驗狀態。
         """
-
-        self.logger.info(
-            f"開始訓練",
-            extra={"worker_id": self.worker_state.id, "trial_id": trial_state.id},
-        )
+        self.log("info", "開始訓練", trial_id=trial_state.id)
 
         hyper = trial_state.hyperparameter
         checkpoint = trial_state.checkpoint
-        train_loader, test_loader = get_data_loader(hyper.model_type, hyper.batch_size)
+        train_loader, test_loader = get_data_loader(hyper.batch_size)
 
         model = get_model(hyper.model_type)
         model.load_state_dict(checkpoint.model_state_dict)
         model.to(self.device)
+
+        current_iteration = 0
 
         optimizer = optim.SGD(model.parameters(), lr=hyper.lr, momentum=hyper.momentum)
         optimizer.load_state_dict(checkpoint.optimzer_state_dict)
@@ -186,76 +205,82 @@ class Worker:
                 break
 
             if trial_state.iteration >= trial_state.stop_iteration:
+                trial_state.accuracy = self.test(model, test_loader)
                 break
+
+            if (
+                self.worker_state.worker_type == WorkerType.GPU
+                and current_iteration >= GPU_MAX_ITERATION
+            ):
+                self.log("info", "已達到 GPU_MAX_ITERATION 次數")
+                self.pause_trial(trial_state)
+                return trial_state
+
+            if trial_state.id in self.interrupt_set:
+                self.log("info", "收到回傳訊號")
+                self.pause_trial(trial_state)
+                self.interrupt_set.remove(trial_state.id)
+                return trial_state
 
             self.train_step(
                 model, optimizer, train_loader, hyper.batch_size, self.device
             )
 
+            trial_state.iteration += 1
+            trial_state.device_iteration_count[self.worker_state.worker_type] += 1
+            current_iteration += 1
+
+            if trial_state.iteration % self.mutation_iteration:
+                continue
+
             trial_state.accuracy = self.test(model, test_loader)
 
-            self.logger.info(
+            self.log(
+                "info",
                 f"Iteration: {trial_state.iteration} Accuracy: {trial_state.accuracy}",
-                extra={"worker_id": self.worker_state.id, "trial_id": trial_state.id},
+                trial_id=trial_state.id,
             )
 
-            trial_state.iteration += 1
+            ray.get(self.tuner.update_trial_result.remote(trial_state))
 
-            if trial_state.iteration % 1 == 0:
-                if trial_state.accuracy > ray.get(
-                    self.tuner.get_accuracy.remote(trial_state.iteration)
-                ):
-                    self.logger.info(
-                        f"向 Tuner 更新 Accuracy:",
-                        extra={
-                            "worker_id": self.worker_state.id,
-                            "trial_id": trial_state.id,
-                        },
-                    )
+            base_line = ray.get(
+                self.tuner.get_baseline.remote(iteration=trial_state.iteration)
+            )
 
-                    ray.get(
-                        self.tuner.record_accuracy.remote(
-                            accuracy=trial_state.accuracy,
-                            iteration=trial_state.iteration,
-                        )
-                    )
-                elif random.choice([True, False, False]):
-                    self.logger.info(
-                        f"執行mutation",
-                        extra={
-                            "worker_id": self.worker_state.id,
-                            "trial_id": trial_state.id,
-                        },
-                    )
-                else:
-                    self.logger.info(
-                        f"訓練中止並回傳",
-                        extra={
-                            "worker_id": self.worker_state.id,
-                            "trial_id": trial_state.id,
-                        },
-                    )
-                    self.pause_trial(trial_state)
-                    return trial_state
-        self.logger.info(
-            f"訓練結束",
-            extra={"worker_id": self.worker_state.id, "trial_id": trial_state.id},
-        )
+            if trial_state.accuracy >= base_line:
+                continue
 
+            self.log(
+                "info",
+                f"Accuracy:{trial_state.accuracy:.4f} < Base Line:{base_line:.4f}",
+                trial_id=trial_state.id,
+            )
+
+            if random.choice((False, False, True)):
+                self.log(
+                    "info",
+                    f"🚫 訓練中止並回傳",
+                    trial_id=trial_state.id,
+                )
+
+                self.pause_trial(trial_state)
+                return trial_state
+
+        self.log("info", f"訓練結束", trial_id=trial_state.id)
         self.finish_trial(trial_state)
 
         return trial_state
 
-    def test(self, model, test_loader) -> Accuracy:
+    def test(self, model: nn.Module, test_loader: DataLoader) -> Accuracy:
         """
-        測試模型並計算準確率。
+        使用測試資料對模型進行測試並回傳準確率。
 
         Args:
-            model (torch.nn.Module): 訓練好的模型。
-            test_loader (torch.utils.data.DataLoader): 測試數據加載器。
+            model (torch.nn.Module): 已訓練的模型。
+            test_loader (torch.utils.data.DataLoader): 測試資料載入器。
 
         Returns:
-            Accuracy: 模型在測試集上的準確率。
+            Accuracy: 模型測試結果的準確率。
         """
         model.eval()
         total = 0
@@ -272,53 +297,96 @@ class Worker:
 
     def finish_trial(self, trial_state: TrialState) -> None:
         """
-        結束並標記一個試驗的狀態為終止。
+        將試驗標記為終止並從活躍列表中移除。
 
         Args:
             trial_state (TrialState): 試驗狀態。
         """
-
         self.active_trials.pop(trial_state.id)
-        trial_state.status = TrialStatus.TERMINAL
+        trial_state.status = TrialStatus.TERMINATE
 
     def pause_trial(self, trial_state: TrialState) -> None:
+        """
+        將試驗標記為暫停並從活躍列表中移除。
+
+        Args:
+            trial_state (TrialState): 試驗狀態。
+        """
         self.active_trials.pop(trial_state.id)
         trial_state.status = TrialStatus.PAUSE
 
     def get_log_file(self) -> Dict[str, Union[int, str]]:
         """
-        獲取工作者的日誌文件內容。
+        取得 worker 對應的日誌檔案內容。
 
         Returns:
-            dict: 包含 worker_id 和日誌內容的字典。
+            dict: 包含 worker ID 與對應日誌內容的字典。
         """
-
         log_dir = None
         for handler in self.logger.handlers:
             if isinstance(handler, logging.FileHandler):
-                log_dir = handler.baseFilename  # 取得資料夾路徑
+                log_dir = handler.baseFilename
                 break
 
         if not log_dir:
-            self.logger.error("Logs direction is not exists")
+            self.log("error", "Logs direction is not exists")
             return {"id": self.worker_state.id, "content": ""}
 
         with open(log_dir, "r") as f:
             return {"id": self.worker_state.id, "content": f.read()}
+
+    def log(self, level: str, message: str, trial_id: Union[int, str] = "N/A") -> None:
+        """
+        根據指定的 log 級別輸出訊息。
+
+        Args:
+            level (str): 記錄等級（info/debug/warning/error/critical）。
+            message (str): 要記錄的訊息。
+            trial_id (Union[int, str], optional): 試驗 ID。預設為 "N/A"。
+        """
+        extra = {
+            "worker_type": self.worker_state.worker_type,
+            "worker_id": self.worker_state.id,
+            "trial_id": trial_id,
+        }
+        if level == "info":
+            self.logger.info(message, extra=extra)
+            return
+        if level == "debug":
+            self.logger.info(message, extra=extra)
+            return
+        if level == "warning":
+            self.logger.warning(message, extra=extra)
+            return
+        if level == "critical":
+            self.logger.critical(message, extra=extra)
+            return
+        if level == "error":
+            self.logger.error(message, extra=extra)
+            return
+
+    def get_worker_type(self) -> WorkerType:
+        """
+        回傳 worker 類型（CPU/GPU）。
+
+        Returns:
+            WorkerType: Worker 類型。
+        """
+        return self.worker_state.worker_type
 
 
 def generate_all_workers(
     tuner: ActorHandle, train_step: TrainStepFunction
 ) -> List[ActorHandle]:
     """
-    根據 Ray 集群中的節點資源創建工作者，並返回工作者 Actor 列表。
+    根據 Ray 叢集的節點資源建立所有 Worker。
 
     Args:
-        train_result (ActorHandle): 用於更新訓練結果的 Actor。
-        train_step (TrainStepFunction): 訓練步驟函數。
+        tuner (ActorHandle): 接收試驗結果的 Actor。
+        train_step (TrainStepFunction): 訓練步驟函式。
 
     Returns:
-        List[ActorHandle]: 創建的工作者 Actor 列表。
+        List[ActorHandle]: 建立的 Worker Actor 清單。
     """
 
     visited_address = set()
@@ -327,7 +395,6 @@ def generate_all_workers(
     head_node_address = get_head_node_address()
     print(head_node_address)
 
-    # Fetch all avaiable resource from Ray cluster.
     for node in ray.nodes():
         node_address = node["NodeManagerAddress"]
 
@@ -341,7 +408,6 @@ def generate_all_workers(
                     cpus = min(resource.get("CPU", 1) - 1, 1)
                 else:
                     cpus = resource.get("CPU", 1)
-                # cpus = resource.get("CPU", 1)
 
                 worker_states.append(
                     WorkerState(
@@ -349,6 +415,8 @@ def generate_all_workers(
                         num_cpus=cpus,
                         num_gpus=0,
                         node_name=f"node:{node_address}",
+                        max_trials=1,
+                        worker_type=WorkerType.CPU,
                     )
                 )
                 index += 1
@@ -360,6 +428,8 @@ def generate_all_workers(
                         num_cpus=0,
                         num_gpus=resource.get("GPU", 0),
                         node_name=f"node:{node_address}",
+                        max_trials=3,
+                        worker_type=WorkerType.GPU,
                     )
                 )
                 index += 1

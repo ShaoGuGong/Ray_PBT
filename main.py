@@ -1,4 +1,6 @@
+import os
 import random
+from datetime import datetime
 from itertools import islice
 from typing import List
 
@@ -6,9 +8,11 @@ import ray
 import torch
 import torch.nn as nn
 
-from trial_state import TrialState
-from tuner import Tuner
-from utils import Hyperparameter, ModelType, get_head_node_address
+from src.config import STOP_ITERATION
+from src.trial_state import TrialState
+from src.tuner import Tuner
+from src.utils import (Hyperparameter, ModelType, get_head_node_address,
+                       unzip_file)
 
 
 def generate_trial_states(n: int = 1) -> List[TrialState]:
@@ -21,7 +25,7 @@ def generate_trial_states(n: int = 1) -> List[TrialState]:
                 batch_size=random.choice([64, 128, 256, 512, 1024]),
                 model_type=ModelType.RESNET_18,
             ),
-            stop_iteration=10,
+            stop_iteration=STOP_ITERATION,
         )
         for i in range(n)
     ]
@@ -31,7 +35,7 @@ def train_step(model, optimizer, train_loader, batch_size, device=torch.device("
     model.train()
     criterion = nn.CrossEntropyLoss().to(device)
 
-    for inputs, targets in islice(train_loader, 1024 // batch_size):
+    for inputs, targets in islice(train_loader, 1):
         inputs, targets = inputs.to(device), targets.to(device)
         optimizer.zero_grad()
         outputs = model(inputs)
@@ -41,11 +45,26 @@ def train_step(model, optimizer, train_loader, batch_size, device=torch.device("
 
 
 if __name__ == "__main__":
-    ray.init(runtime_env={"working_dir": "./src", "exclude": ["logs/"]})
-
+    ray.init(
+        runtime_env={
+            "working_dir": ".",
+            "excludes": [".git", "test", "logs/*", "LICENSE", "README.md"],
+        }
+    )
+    trial_states = generate_trial_states(40)
     tuner = Tuner.options(
         max_concurrency=3,
         num_cpus=1,
         resources={f"node:{get_head_node_address()}": 0.01},
-    ).remote(generate_trial_states(20), train_step)
+    ).remote(trial_states, train_step)
     ray.get(tuner.run.remote())
+
+    zip_logs_bytes: bytes = ray.get(tuner.get_zipped_log.remote())
+
+    zip_output_dir = f"./logs/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}/"
+    os.makedirs(zip_output_dir, exist_ok=True)
+    zip_output_path = os.path.join(zip_output_dir, "logs.zip")
+    with open(zip_output_path, "wb") as f:
+        f.write(zip_logs_bytes)
+
+    unzip_file(zip_output_path, zip_output_dir)
