@@ -3,7 +3,7 @@ from typing import Dict, List, Optional, Tuple
 
 import torch.optim as optim
 
-from .config import (STOP_ACCURACY, TRIAL_PROGRESS_OUTPUT_PATH,
+from .config import (STOP_ACCURACY, STOP_ITERATION, TRIAL_PROGRESS_OUTPUT_PATH,
                      TRIAL_RESULT_OUTPUT_PATH)
 from .utils import (Checkpoint, Hyperparameter, TrialStatus, WorkerType,
                     get_model)
@@ -14,7 +14,7 @@ class TrialState:
         self,
         id: int,
         hyperparameter: Hyperparameter,
-        stop_iteration: int = 10,
+        stop_iteration: int = STOP_ITERATION,
     ) -> None:
         self.id = id
         self.hyperparameter = hyperparameter
@@ -24,6 +24,7 @@ class TrialState:
         self.worker_type: Optional[WorkerType] = None
         self.run_time = 0
         self.iteration = 0
+        self.phase = 0
         self.device_iteration_count = {WorkerType.CPU: 0, WorkerType.GPU: 0}
 
         model = get_model(self.hyperparameter.model_type)
@@ -55,8 +56,10 @@ class TrialResult:
         self.history_best: Tuple[
             float, Optional[Hyperparameter], Optional[Checkpoint]
         ] = (0.0, None, None)
-        self.trial_state_history: Dict[int, Dict] = {}
         self.trial_progress: Dict[int, TrialState] = {}
+
+    def get_trial_progress(self) -> List[TrialState]:
+        return list(self.trial_progress.values())
 
     def record_trial_progress(self, trial_state: TrialState) -> None:
         self.trial_progress[trial_state.id] = trial_state
@@ -79,8 +82,10 @@ class TrialResult:
     def get_mean_accuray(self, iteration: int) -> float:
         return sum([i[0] for i in self.table[iteration]]) / len(self.table[iteration])
 
-    def get_top_k_result(self, iteration: int) -> List[Tuple[float, Hyperparameter]]:
-        return self.table[iteration][: self.top_k]
+    def get_top_k_result(
+        self, iteration: int, k: int
+    ) -> List[Tuple[float, Hyperparameter]]:
+        return self.table[iteration][:k]
 
     def get_history_best_result(
         self,
@@ -147,18 +152,20 @@ class TrialResult:
     ) -> None:
         try:
             with open(output_path, "w") as f:
-                f.write(f"┏{'':━^7}┳{'':━^11}┳{'':━^11}┳{'':━^43}┳{'':━^7}┳{'':━^7}┓\n")
                 f.write(
-                    f"┃{'':^7}┃{'':^11}┃{'Worker':^11}┃{'Hyparameter':^43}┃{'':^7}┃{'':^7}┃\n"
+                    f"┏{'':━^4}┳{'':━^11}┳{'':━^11}┳{'':━^37}┳{'':━^5}┳{'':━^7}┳{'':━^7}┓\n"
                 )
                 f.write(
-                    f"┃{'Trial':^7}┃{'Status':^11}┣{'':━^4}┳{'':━^6}╋{'':━^7}┳{'':━^10}┳{'':━^12}┳{'':━^11}┫{'Iter':^7}┃{'Acc':^7}┃\n"
+                    f"┃{'':^4}┃{'':^11}┃{'Worker':^11}┃{'Hyparameter':^37}┃{'':^5}┃{'':^7}┃{'':^7}┃\n"
                 )
                 f.write(
-                    f"┃{'':^7}┃{'':^11}┃{'ID':^4}┃{'TYPE':^6}┃{'lr':^7}┃{'momentum':^10}┃{'batch size':^12}┃{'Model':^11}┃{'':^7}┃{'':^7}┃\n"
+                    f"┃{'ID':^4}┃{'Status':^11}┣{'':━^4}┳{'':━^6}╋{'':━^7}┳{'':━^10}┳{'':━^6}┳{'':━^11}┫{'Phase':^5}┃{'Iter':^7}┃{'Acc':^7}┃\n"
                 )
                 f.write(
-                    f"┣{'':━^7}╋{'':━^11}╋{'':━^4}╋{'':━^6}╋{'':━^7}╋{'':━^10}╋{'':━^12}╋{'':━^11}╋{'':━^7}╋{'':━^7}┫\n"
+                    f"┃{'':^4}┃{'':^11}┃{'ID':^4}┃{'TYPE':^6}┃{'lr':^7}┃{'momentum':^10}┃{'bs':^6}┃{'model':^11}┃{'':^5}┃{'':^7}┃{'':^7}┃\n"
+                )
+                f.write(
+                    f"┣{'':━^4}╋{'':━^11}╋{'':━^4}╋{'':━^6}╋{'':━^7}╋{'':━^10}╋{'':━^6}╋{'':━^11}╋{'':━^5}╋{'':━^7}╋{'':━^7}┫\n"
                 )
 
                 for i in self.trial_progress.values():
@@ -168,17 +175,15 @@ class TrialResult:
                     elif i.worker_type == WorkerType.GPU:
                         worker_type = "GPU"
                     h = i.hyperparameter
+                    worker_id = i.worker_id
+                    if i.worker_id == -1:
+                        worker_id = ""
                     f.write(
-                        f"┃{i.id:>7}┃{i.status:^11}┃{i.worker_id:>4}┃{worker_type:^6}┃{h.lr:>7.3f}┃{h.momentum:>10.3f}┃{h.batch_size:>12}┃{h.model_type:^11}┃{i.iteration:>7}┃{i.accuracy:>7.3f}┃\n"
+                        f"┃{i.id:>4}┃{i.status:^11}┃{worker_id:>4}┃{worker_type:^6}┃{h.lr:>7.3f}┃{h.momentum:>10.3f}┃{h.batch_size:>6}┃{h.model_type:^11}┃{i.phase:>5}┃{i.iteration:>7}┃{i.accuracy:>7.3f}┃\n"
                     )
                 f.write(
-                    f"┗{'':━^7}┻{'':━^11}┻{'':━^4}┻{'':━^6}┻{'':━^7}┻{'':━^10}┻{'':━^12}┻{'':━^11}┻{'':━^7}┻{'':━^7}┛\n"
+                    f"┗{'':━^4}┻{'':━^11}┻{'':━^4}┻{'':━^6}┻{'':━^7}┻{'':━^10}┻{'':━^6}┻{'':━^11}┻{'':━^5}┻{'':━^7}┻{'':━^7}┛\n"
                 )
 
         except Exception as e:
             print(f"{e}")
-
-    def to_json(self) -> str:
-        import json
-
-        return json.dumps(self.table)

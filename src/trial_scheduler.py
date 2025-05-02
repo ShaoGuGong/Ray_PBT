@@ -8,8 +8,9 @@ from typing import Any, List, Optional, Protocol
 import ray
 from ray import ObjectRef
 from ray.actor import ActorHandle
-from torch.cuda import is_available
 
+from .config import PHASE_ITERATION, STOP_ITERATION
+from .trial_phase import TrialPhase
 from .trial_state import TrialState
 from .utils import TrialStatus, WorkerType, colored_progress_bar
 
@@ -29,6 +30,7 @@ def round_robin_strategy(
     pending_trial_states: List[TrialState],
     gpu_workers: List[ActorHandle],
     cpu_workers: List[ActorHandle],
+    trial_phase: TrialPhase,
 ) -> Optional[ObjectRef]:
     if not pending_trial_states:
         return None
@@ -62,12 +64,22 @@ def round_robin_strategy(
         return None
 
     worker = next(iter(available_cpu_workers))
-    trial_state = min(pending_trial_states, key=lambda x: x.iteration)
+    available_trials = [
+        trial
+        for trial in pending_trial_states
+        if trial.phase <= trial_phase.current_phase
+    ]
 
-    pending_trial_states.remove(trial_state)
-    future = worker.assign_trial.remote(trial_state)
+    if available_trials:
+        trial_state = max(
+            available_trials,
+            key=lambda x: x.iteration,
+        )
 
-    return future
+        pending_trial_states.remove(trial_state)
+        future = worker.assign_trial.remote(trial_state)
+
+        return future
 
 
 def gpu_first_strategy(
@@ -166,6 +178,7 @@ class TrialScheduler:
             trial_states (List[TrialState]): 初始的試驗狀態列表。
         """
         self.tuner = tuner
+        self.trial_phase = TrialPhase(STOP_ITERATION, PHASE_ITERATION)
 
         self.pending_trial_states: List[TrialState] = trial_states
         self.completed_trial_states: List[TrialState] = []
@@ -201,6 +214,7 @@ class TrialScheduler:
         Returns:
             List[ObjectRef]: 當前正在運行的訓練任務列表。
         """
+        self.update_phase()
         if self.pending_trial_states:
             pending_trial_list = sorted(
                 self.pending_trial_states, key=lambda t: t.iteration
@@ -213,6 +227,7 @@ class TrialScheduler:
                 pending_trial_states=self.pending_trial_states,
                 gpu_workers=self.gpu_workers,
                 cpu_workers=self.cpu_workers,
+                trial_phase=self.trial_phase,
             )
             if future is not None:
                 self.running_futures.append(future)
@@ -296,6 +311,19 @@ class TrialScheduler:
             with open(os.path.join(log_dir, f"worker-{future['id']}.log"), "w") as f:
                 f.write(future["content"])
 
+    def update_phase(self):
+        old = self.trial_phase.current_phase
+
+        self.trial_phase.update_phase(ray.get(self.tuner.get_trial_progress.remote()))
+
+        if old != self.trial_phase.current_phase:
+            self.logger.info(f"更新階段到Phase {self.trial_phase.current_phase}")
+            futures = [
+                worker.update_phase.remote(self.trial_phase.current_phase)
+                for worker in self.workers
+            ]
+            ray.get(futures)
+
     async def handle_done_futures(self, done_futures: List[ObjectRef]):
         """
         處理已完成的訓練任務，將結果添加到已完成試驗狀態列表中。
@@ -316,13 +344,20 @@ class TrialScheduler:
                         f"✅ 已完成的訓練任務列表: {sorted([i.id for i in self.completed_trial_states])}"
                     )
 
+                elif trial_state.status == TrialStatus.NEED_MUTATION:
+                    trial_state = ray.get(self.tuner.mutation.remote(trial_state))
+                    trial_state.status = TrialStatus.PENDING
+                    self.pending_trial_states.append(trial_state)
+                    self.logger.info(
+                        f"🔃 Worker {trial_state.worker_id} 回傳未完成 Trial {trial_state.id}, Iteration: {trial_state.iteration} ，Accuracy: {trial_state.accuracy:.2f}"
+                    )
+
                 elif trial_state.status == TrialStatus.PAUSE:
                     trial_state.status = TrialStatus.PENDING
                     self.pending_trial_states.append(trial_state)
                     self.logger.info(
                         f"🔃 Worker {trial_state.worker_id} 回傳未完成 Trial {trial_state.id}, Iteration: {trial_state.iteration} ，Accuracy: {trial_state.accuracy:.2f}"
                     )
-                    trial_state = ray.get(self.tuner.mutation.remote(trial_state))
 
                 elif trial_state.status == TrialStatus.PENDING:
                     self.pending_trial_states.append(trial_state)

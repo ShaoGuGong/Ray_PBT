@@ -10,7 +10,11 @@ import torch.optim as optim
 from ray.actor import ActorHandle
 from torch.utils.data import DataLoader
 
-from .config import GPU_MAX_ITERATION, MUTATION_ITERATION
+from src import trial_phase
+
+from .config import (GPU_MAX_ITERATION, MUTATION_ITERATION, PHASE_ITERATION,
+                     STOP_ITERATION)
+from .trial_phase import TrialPhase
 from .trial_state import TrialState
 from .utils import (Accuracy, TrainStepFunction, TrialStatus, WorkerState,
                     WorkerType, get_data_loader, get_head_node_address,
@@ -104,6 +108,7 @@ class Worker:
         worker_state: WorkerState,
         train_step: TrainStepFunction,
         tuner: ActorHandle,
+        trial_phase: TrialPhase,
     ) -> None:
         """
         初始化 Worker，設定狀態與參數。
@@ -122,6 +127,7 @@ class Worker:
         self.tuner = tuner
         self.mutation_iteration: int = MUTATION_ITERATION
         self.interrupt_set: set = set()
+        self.trial_phase = trial_phase
 
     def send_signal(self, trial_id: int) -> None:
         if trial_id not in self.active_trials.keys():
@@ -186,7 +192,7 @@ class Worker:
 
         hyper = trial_state.hyperparameter
         checkpoint = trial_state.checkpoint
-        train_loader, test_loader = get_data_loader(hyper.batch_size)
+        train_loader, test_loader, _ = get_data_loader(hyper.batch_size)
 
         model = get_model(hyper.model_type)
         model.load_state_dict(checkpoint.model_state_dict)
@@ -208,6 +214,20 @@ class Worker:
                 trial_state.accuracy = self.test(model, test_loader)
                 break
 
+            if self.trial_phase.is_trial_exceeding(trial_state):
+                self.log(
+                    "info", f"已超過當前階段 Phase{self.trial_phase.current_phase}"
+                )
+                self.pause_trial(trial_state)
+                return trial_state
+
+            if (
+                self.worker_state.worker_type == WorkerType.CPU
+                and trial_state.phase < self.trial_phase.current_phase
+            ):
+                self.pause_trial(trial_state)
+                return trial_state
+
             if (
                 self.worker_state.worker_type == WorkerType.GPU
                 and current_iteration >= GPU_MAX_ITERATION
@@ -227,6 +247,7 @@ class Worker:
             )
 
             trial_state.iteration += 1
+            trial_state.phase = self.trial_phase.get_trial_phase(trial_state)
             trial_state.device_iteration_count[self.worker_state.worker_type] += 1
             current_iteration += 1
 
@@ -237,7 +258,7 @@ class Worker:
 
             self.log(
                 "info",
-                f"Iteration: {trial_state.iteration} Accuracy: {trial_state.accuracy}",
+                f"Phase: {trial_state.phase}, Iteration: {trial_state.iteration} Accuracy: {trial_state.accuracy}",
                 trial_id=trial_state.id,
             )
 
@@ -259,11 +280,11 @@ class Worker:
             if random.choice((False, False, True)):
                 self.log(
                     "info",
-                    f"🚫 訓練中止並回傳",
+                    f"↩️ 需要執行突變，已回傳",
                     trial_id=trial_state.id,
                 )
 
-                self.pause_trial(trial_state)
+                self.need_mutation_trial(trial_state)
                 return trial_state
 
         self.log("info", f"訓練結束", trial_id=trial_state.id)
@@ -314,6 +335,10 @@ class Worker:
         """
         self.active_trials.pop(trial_state.id)
         trial_state.status = TrialStatus.PAUSE
+
+    def need_mutation_trial(self, trial_state: TrialState):
+        self.active_trials.pop(trial_state.id)
+        trial_state.status = TrialStatus.NEED_MUTATION
 
     def get_log_file(self) -> Dict[str, Union[int, str]]:
         """
@@ -373,6 +398,10 @@ class Worker:
             WorkerType: Worker 類型。
         """
         return self.worker_state.worker_type
+
+    def update_phase(self, phase) -> None:
+        self.log("info", f"更新階段到Phase {self.trial_phase.current_phase}")
+        self.trial_phase.current_phase = phase
 
 
 def generate_all_workers(
@@ -446,7 +475,12 @@ def generate_all_workers(
                 num_cpus=worker_state.num_cpus,
                 num_gpus=worker_state.num_gpus,
                 resources={worker_state.node_name: 0.01},
-            ).remote(worker_state, train_step=train_step, tuner=tuner)
+            ).remote(
+                worker_state,
+                train_step=train_step,
+                tuner=tuner,
+                trial_phase=TrialPhase(STOP_ITERATION, PHASE_ITERATION),
+            )
         )
 
     return workers
