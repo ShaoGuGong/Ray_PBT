@@ -1,16 +1,18 @@
 import os
+import random
 import zipfile
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import reduce
 from typing import Any, Callable, List, Optional, Protocol, TypeVar
 
+import numpy as np
 import ray
 import torch.nn as nn
 import torchvision
 import torchvision.models as models
 import torchvision.transforms as transforms
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
 from .config import DATASET_PATH
 
@@ -43,6 +45,7 @@ class TrialStatus(Enum):
     PENDING = auto()
     TERMINATE = auto()
     PAUSE = auto()
+    NEED_MUTATION = auto()
 
     def __str__(self):
         return self.name
@@ -84,6 +87,15 @@ class Hyperparameter:
 
     def __str__(self) -> str:
         return f"Hyperparameter(lr:{self.lr:.3f}, momentum:{self.momentum:.3f}, batch_size:{self.batch_size:4d}, model_type:{self.model_type})"
+
+    @classmethod
+    def random(cls) -> "Hyperparameter":
+        return cls(
+            lr=random.uniform(0.001, 1),
+            momentum=random.uniform(0.001, 1),
+            batch_size=random.choice([64, 128, 256, 512, 1024]),
+            model_type=ModelType.RESNET_18,
+        )
 
 
 @dataclass
@@ -153,22 +165,43 @@ def get_data_loader(
             ]
         )
 
+    train_dataset = torchvision.datasets.CIFAR10(
+        root=data_dir, train=True, download=False, transform=train_transform
+    )
+    test_dataset = torchvision.datasets.CIFAR10(
+        root=data_dir, train=False, download=False, transform=test_transform
+    )
+
+    np.random.seed(42)
+    indices = np.random.permutation(len(test_dataset))
+    test_size = len(test_dataset) // 2
+    test_indices = indices[:test_size]
+    valid_indices = indices[test_size:]
+
+    valid_dataset = Subset(test_dataset, valid_indices.tolist())
+    test_dataset = Subset(test_dataset, test_indices.tolist())
+
+    print(f"{len(train_dataset)=}, {len(valid_dataset)=}, {len(test_dataset)=}")
+
     train_loader = DataLoader(
-        torchvision.datasets.CIFAR10(
-            root=data_dir, train=True, download=False, transform=train_transform
-        ),
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+    )
+
+    valid_loader = DataLoader(
+        valid_dataset,
         batch_size=batch_size,
         shuffle=True,
     )
 
     test_loader = DataLoader(
-        torchvision.datasets.CIFAR10(
-            root=data_dir, train=False, download=False, transform=test_transform
-        ),
+        test_dataset,
         batch_size=batch_size,
         shuffle=False,
     )
-    return train_loader, test_loader
+
+    return train_loader, valid_loader, test_loader
 
 
 def get_model(model_type: ModelType):

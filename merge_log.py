@@ -13,21 +13,24 @@ def parse_timestamp(line: str):
 
 
 def merge_logs_by_timestamp(input_dir: str, output_file: str):
-    log_entries = []
-
     for dirname in os.listdir(os.path.abspath(input_dir)):
+        log_entries = []
+
         dirpath = os.path.join(input_dir, dirname)
         if os.path.isfile(dirpath):
             continue
 
-        if os.path.exists(os.path.join(dirpath, output_file)):
+        print(f"開始讀取{dirpath}")
+        if not os.path.exists(os.path.join(dirpath, output_file)):
             continue
 
         for filename in os.listdir(dirpath):
+            if filename == output_file:
+                continue
             if not filename.endswith(".log"):
                 continue
-
             filepath = os.path.join(dirpath, filename)
+            print(f"開始讀取{filename}")
             with open(filepath, "r") as f:
                 for line in f:
                     ts = parse_timestamp(line)
@@ -41,13 +44,15 @@ def merge_logs_by_timestamp(input_dir: str, output_file: str):
                                 log_entries[-1][1] + "\n" + line.strip(),
                             )
 
-        # 時間排序
-        log_entries.sort(key=lambda x: x[0])
-
+            # 時間排序
+            log_entries.sort(key=lambda x: x[0])
+        print(f"合併log到{output_file}")
         # 寫入合併結果
         with open(os.path.join(dirpath, output_file), "w") as out:
             for _, line in log_entries:
                 out.write(line + "\n")
+
+        print("=====================")
 
 
 # 使用方式

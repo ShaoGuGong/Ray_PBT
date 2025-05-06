@@ -3,7 +3,6 @@ import math
 import os
 import random
 import zipfile
-from dataclasses import replace
 from datetime import datetime
 from typing import List, Tuple
 
@@ -11,7 +10,7 @@ import ray
 
 from .trial_scheduler import TrialScheduler
 from .trial_state import TrialResult, TrialState
-from .utils import TrainStepFunction, WorkerType
+from .utils import Hyperparameter, TrainStepFunction, WorkerType
 from .worker import generate_all_workers
 
 
@@ -76,7 +75,6 @@ class Tuner:
         self.logger.info("開始訓練")
         self.scheduler.run()
         self.scheduler.get_workers_logs()
-        self.logger.info(f"{len(self.trial_states)}")
         self.logger.info("結束訓練")
 
     def update_trial_result(self, trial_state: TrialState):
@@ -94,32 +92,32 @@ class Tuner:
             f"Trial {trial_state.id}: 執行mutation, 原始超參數: {trial_state.hyperparameter}"
         )
 
-        _, hyperparameter, _ = self.trial_result.get_history_best_result()
+        # _, hyperparameter, _ = self.trial_result.get_history_best_result()
+        hyperparameters = [
+            result[1]
+            for result in self.trial_result.get_top_k_result(trial_state.iteration, 10)
+        ]
 
-        if hyperparameter:
-            mutation_hyperparameter = (
-                (
-                    "lr",
-                    hyperparameter.lr
-                    * 0.5
-                    * (0.0001 + 0.1)
-                    * (
-                        1
-                        + math.cos(
-                            math.pi * trial_state.iteration * trial_state.stop_iteration
-                        )
-                    ),
-                ),
-                ("momentum", random.uniform(0.001, 1)),
-                ("batch_size", random.choice([64, 128, 256, 512, 1024])),
-            )
-            trial_state.hyperparameter = replace(
-                hyperparameter,
-                **{k: v for k, v in random.sample(mutation_hyperparameter, 1)},
-            )
+        hyperparameter = Hyperparameter.random()
+        # hyperparameter.lr = (
+        #     trial_state.hyperparameter.lr
+        #     * 0.5
+        #     * (0.0001 + 0.1)
+        #     * (
+        #         1
+        #         + math.cos(math.pi * trial_state.iteration / trial_state.stop_iteration)
+        #     )
+        # )
+        if len(hyperparameters) >= 3:
+            random_hyperparameters = random.sample(hyperparameters, 3)
+            hyperparameter.lr = random_hyperparameters[0].lr * 0.8
+            hyperparameter.momentum = random_hyperparameters[1].momentum
+            hyperparameter.batch_size = random_hyperparameters[2].batch_size
+
+        trial_state.hyperparameter = hyperparameter
 
         self.logger.info(
-            f"Trial {trial_state.id}: 結束mutation, 新超參數: {trial_state.hyperparameter}"
+            f"Trial-{trial_state.id} Iter-{trial_state.iteration}, 結束mutation, 新超參數: {trial_state.hyperparameter}"
         )
 
         return trial_state
@@ -136,6 +134,9 @@ class Tuner:
         target = min(cpu_trial, key=lambda x: x.iteration)
         return target.worker_id, target.id
 
+    def get_trial_progress(self) -> List[TrialState]:
+        return self.trial_result.get_trial_progress()
+
     def get_zipped_log(self) -> bytes:
         log_dir = None
 
@@ -148,7 +149,7 @@ class Tuner:
 
         zip_path = "./logs.zip"
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for root, dirs, files in os.walk(log_dir):
+            for root, _, files in os.walk(log_dir):
                 for file in files:
                     abs_file = os.path.join(root, file)
                     rel_path = os.path.relpath(abs_file, log_dir)
