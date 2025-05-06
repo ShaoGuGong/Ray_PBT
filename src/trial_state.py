@@ -49,7 +49,7 @@ class TrialState:
 
 
 class TrialResult:
-    def __init__(self, top_k: int = 5, bottom_k: int = 5) -> None:
+    def __init__(self, top_k: int = 3, bottom_k: int = 3) -> None:
         self.table: Dict[int, List[Tuple[float, Hyperparameter]]] = defaultdict(list)
         self.top_k: int = top_k
         self.bottom_k: int = bottom_k
@@ -80,6 +80,8 @@ class TrialResult:
         self.display_results()
 
     def get_mean_accuray(self, iteration: int) -> float:
+        if len(self.table[iteration]) < 5:
+            return 0.0
         return sum([i[0] for i in self.table[iteration]]) / len(self.table[iteration])
 
     def get_top_k_result(

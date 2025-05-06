@@ -34,7 +34,7 @@ class TrialPhase:
         for trial in trial_states:
             if trial.phase == self.current_phase + 1:
                 count += 1
-        if count > len(trial_states) * 0.75:
+        if count > len(trial_states) - 20:
             self.current_phase += 1
 
     def get_trial_phase(self, trial_state: TrialState) -> int:

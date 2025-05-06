@@ -10,8 +10,6 @@ import torch.optim as optim
 from ray.actor import ActorHandle
 from torch.utils.data import DataLoader
 
-from src import trial_phase
-
 from .config import (GPU_MAX_ITERATION, MUTATION_ITERATION, PHASE_ITERATION,
                      STOP_ITERATION)
 from .trial_phase import TrialPhase
@@ -120,14 +118,14 @@ class Worker:
         """
         self.worker_state: WorkerState = worker_state
         self.active_trials: Dict[int, TrialState] = {}
-        self.train_step = train_step
+        self.train_step: TrainStepFunction = train_step
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.logger = get_worker_logger(worker_id=worker_state.id)
         self.log("info", "初始化完成")
         self.tuner = tuner
         self.mutation_iteration: int = MUTATION_ITERATION
         self.interrupt_set: set = set()
-        self.trial_phase = trial_phase
+        self.trial_phase: TrialPhase = trial_phase
 
     def send_signal(self, trial_id: int) -> None:
         if trial_id not in self.active_trials.keys():
@@ -200,19 +198,19 @@ class Worker:
 
         current_iteration = 0
 
-        optimizer = optim.SGD(model.parameters(), lr=hyper.lr, momentum=hyper.momentum)
+        optimizer = optim.SGD(model.parameters(), lr=hyper.lr, momentum=hyper.momentum)  # type: ignore
         optimizer.load_state_dict(checkpoint.optimzer_state_dict)
         for param_group in optimizer.param_groups:
             param_group["lr"] = hyper.lr
             param_group["momentum"] = hyper.momentum
 
         while True:
-            if trial_state.accuracy > trial_state.stop_accuracy:
-                break
-
-            if trial_state.iteration >= trial_state.stop_iteration:
-                trial_state.accuracy = self.test(model, test_loader)
-                break
+            # if trial_state.accuracy > trial_state.stop_accuracy:
+            #     break
+            #
+            # if trial_state.iteration >= trial_state.stop_iteration:
+            #     trial_state.accuracy = self.test(model, test_loader)
+            #     break
 
             if self.trial_phase.is_trial_exceeding(trial_state):
                 self.log(
@@ -255,6 +253,7 @@ class Worker:
                 continue
 
             trial_state.accuracy = self.test(model, test_loader)
+            ray.get(self.tuner.update_trial_result.remote(trial_state))  # type: ignore
 
             self.log(
                 "info",
@@ -262,10 +261,14 @@ class Worker:
                 trial_id=trial_state.id,
             )
 
-            ray.get(self.tuner.update_trial_result.remote(trial_state))
+            if trial_state.accuracy > trial_state.stop_accuracy:
+                break
+
+            if trial_state.iteration >= trial_state.stop_iteration:
+                break
 
             base_line = ray.get(
-                self.tuner.get_baseline.remote(iteration=trial_state.iteration)
+                self.tuner.get_baseline.remote(iteration=trial_state.iteration)  # type: ignore
             )
 
             if trial_state.accuracy >= base_line:
@@ -451,17 +454,19 @@ def generate_all_workers(
                 index += 1
 
             if "GPU" in resource:
-                worker_states.append(
-                    WorkerState(
-                        id=index,
-                        num_cpus=0,
-                        num_gpus=resource.get("GPU", 0),
-                        node_name=f"node:{node_address}",
-                        max_trials=3,
-                        worker_type=WorkerType.GPU,
+                for _ in range(int(resource["GPU"])):
+                    worker_states.append(
+                        WorkerState(
+                            id=index,
+                            num_cpus=0,
+                            # num_gpus=resource.get("GPU", 0),
+                            num_gpus=1,
+                            node_name=f"node:{node_address}",
+                            max_trials=3,
+                            worker_type=WorkerType.GPU,
+                        )
                     )
-                )
-                index += 1
+                    index += 1
             visited_address.add(node_address)
 
     workers: list[ActorHandle] = []
@@ -469,7 +474,7 @@ def generate_all_workers(
 
     for index, worker_state in enumerate(worker_states):
         workers.append(
-            Worker.options(
+            Worker.options(  # type: ignore
                 max_concurrency=worker_state.max_trials + 1,
                 name=f"worker-{index}",
                 num_cpus=worker_state.num_cpus,

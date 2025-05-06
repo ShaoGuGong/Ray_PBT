@@ -28,7 +28,7 @@ def train_step(model, optimizer, train_loader, batch_size, device=torch.device("
     model.train()
     criterion = nn.CrossEntropyLoss().to(device)
 
-    for inputs, targets in islice(train_loader, 1):
+    for inputs, targets in islice(train_loader, 1024 // batch_size):
         inputs, targets = inputs.to(device), targets.to(device)
         optimizer.zero_grad()
         outputs = model(inputs)

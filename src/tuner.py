@@ -75,7 +75,6 @@ class Tuner:
         self.logger.info("開始訓練")
         self.scheduler.run()
         self.scheduler.get_workers_logs()
-        self.logger.info(f"{len(self.trial_states)}")
         self.logger.info("結束訓練")
 
     def update_trial_result(self, trial_state: TrialState):
@@ -96,29 +95,29 @@ class Tuner:
         # _, hyperparameter, _ = self.trial_result.get_history_best_result()
         hyperparameters = [
             result[1]
-            for result in self.trial_result.get_top_k_result(trial_state.iteration, 5)
+            for result in self.trial_result.get_top_k_result(trial_state.iteration, 10)
         ]
 
         hyperparameter = Hyperparameter.random()
-        hyperparameter.lr = (
-            trial_state.hyperparameter.lr
-            * 0.5
-            * (0.0001 + 0.1)
-            * (
-                1
-                + math.cos(math.pi * trial_state.iteration / trial_state.stop_iteration)
-            )
-        )
-
-        if len(hyperparameters) >= 2:
-            random_hyperparameters = random.sample(hyperparameters, 2)
-            hyperparameter.momentum = random_hyperparameters[0].momentum
-            hyperparameter.batch_size = random_hyperparameters[1].batch_size
+        # hyperparameter.lr = (
+        #     trial_state.hyperparameter.lr
+        #     * 0.5
+        #     * (0.0001 + 0.1)
+        #     * (
+        #         1
+        #         + math.cos(math.pi * trial_state.iteration / trial_state.stop_iteration)
+        #     )
+        # )
+        if len(hyperparameters) >= 3:
+            random_hyperparameters = random.sample(hyperparameters, 3)
+            hyperparameter.lr = random_hyperparameters[0].lr * 0.8
+            hyperparameter.momentum = random_hyperparameters[1].momentum
+            hyperparameter.batch_size = random_hyperparameters[2].batch_size
 
         trial_state.hyperparameter = hyperparameter
 
         self.logger.info(
-            f"Trial {trial_state.id}: 結束mutation, 新超參數: {trial_state.hyperparameter}"
+            f"Trial-{trial_state.id} Iter-{trial_state.iteration}, 結束mutation, 新超參數: {trial_state.hyperparameter}"
         )
 
         return trial_state

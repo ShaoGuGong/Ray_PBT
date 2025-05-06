@@ -32,15 +32,45 @@ def round_robin_strategy(
     cpu_workers: List[ActorHandle],
     trial_phase: TrialPhase,
 ) -> Optional[ObjectRef]:
+
     if not pending_trial_states:
         return None
 
+    # Assign to CPU
+    available_futures = [worker.get_available_slots.remote() for worker in cpu_workers]
+
+    available_cpu_workers = [
+        worker
+        for worker, available_slots in zip(cpu_workers, ray.get(available_futures))  # type: ignore
+        if available_slots
+    ]
+
+    if available_cpu_workers:
+        worker = next(iter(available_cpu_workers))
+        available_trials = [
+            trial
+            for trial in pending_trial_states
+            if trial.phase <= trial_phase.current_phase
+        ]
+
+        if available_trials:
+            trial_state = max(
+                available_trials,
+                key=lambda x: x.iteration,
+            )
+
+            pending_trial_states.remove(trial_state)
+            future = worker.assign_trial.remote(trial_state)
+
+            return future
+
+    # Assign to GPU
     available_futures = [worker.get_available_slots.remote() for worker in gpu_workers]
 
     available_gpu_workers = [
         (worker, available_slots)
-        for worker, available_slots in zip(gpu_workers, ray.get(available_futures))
-        if available_slots > 0
+        for worker, available_slots in zip(gpu_workers, ray.get(available_futures))  # type: ignore
+        if available_slots
     ]
 
     if available_gpu_workers:
@@ -52,65 +82,46 @@ def round_robin_strategy(
 
         return future
 
-    available_futures = [worker.get_available_slots.remote() for worker in cpu_workers]
 
-    available_cpu_workers = [
-        worker
-        for worker, available_slots in zip(cpu_workers, ray.get(available_futures))
+def gpu_first_strategy(
+    pending_trial_states: List[TrialState],
+    gpu_workers: List[ActorHandle],
+    cpu_workers: List[ActorHandle],
+    **kargs: Any,
+) -> Optional[ObjectRef]:
+    logger = kargs["logger"]
+
+    available_futures = [worker.get_available_slots.remote() for worker in gpu_workers]
+    available_gpu_workers = [
+        (worker, available_slots)
+        for worker, available_slots in zip(gpu_workers, ray.get(available_futures))  # type: ignore
         if available_slots
     ]
 
-    if not available_cpu_workers:
+    if not available_gpu_workers:
         return None
 
-    worker = next(iter(available_cpu_workers))
-    available_trials = [
-        trial
-        for trial in pending_trial_states
-        if trial.phase <= trial_phase.current_phase
-    ]
-
-    if available_trials:
-        trial_state = max(
-            available_trials,
-            key=lambda x: x.iteration,
-        )
+    if len(pending_trial_states):
+        worker = max(available_gpu_workers, key=lambda x: x[1])[0]
+        trial_state = min(pending_trial_states, key=lambda x: x.iteration)
 
         pending_trial_states.remove(trial_state)
         future = worker.assign_trial.remote(trial_state)
 
         return future
 
-
-def gpu_first_strategy(
-    gpu_workers: List[ActorHandle],
-    cpu_workers: List[ActorHandle],
-    **kargs: Any,
-) -> Optional[ObjectRef]:
-    logger = kargs["logger"]
-    available_futures = [worker.get_available_slots.remote() for worker in gpu_workers]
-
-    available_gpu_workers = [
-        worker
-        for worker, available_slots in zip(gpu_workers, ray.get(available_futures))
-        if available_slots > 0
-    ]
-
-    if not available_gpu_workers:
-        return None
-
     available_futures = [worker.get_active_trials.remote() for worker in cpu_workers]
 
     running_cpu_workers = [
         (worker, min(activate_trials, key=lambda x: x.iteration))
-        for worker, activate_trials in zip(cpu_workers, ray.get(available_futures))
+        for worker, activate_trials in zip(cpu_workers, ray.get(available_futures))  # type: ignore
         if len(activate_trials) > 0
     ]
 
     if running_cpu_workers:
         worker, trial_state = min(running_cpu_workers, key=lambda x: x[1].iteration)
         logger.info(f"對 Trial {trial_state.id} 執行搶奪")
-        ray.get(worker.send_signal.remote(trial_state.id))
+        ray.get(worker.send_signal.remote(trial_state.id))  # type: ignore
 
 
 def get_trial_scheduler_logger() -> logging.Logger:
@@ -183,6 +194,7 @@ class TrialScheduler:
         self.pending_trial_states: List[TrialState] = trial_states
         self.completed_trial_states: List[TrialState] = []
         self.waiting_trial_states: List[TrialState] = []
+        self.trial_state_nums = len(self.pending_trial_states)
 
         self.running_futures: List[ObjectRef] = []
         self.logger = get_trial_scheduler_logger()
@@ -192,20 +204,20 @@ class TrialScheduler:
         self.gpu_workers = [
             worker
             for worker in self.workers
-            if ray.get(worker.get_worker_type.remote()) == WorkerType.GPU
+            if ray.get(worker.get_worker_type.remote()) == WorkerType.GPU  # type: ignore
         ]
         self.idle_gpu_count = 0
 
         self.cpu_workers = [
             worker
             for worker in self.workers
-            if ray.get(worker.get_worker_type.remote()) == WorkerType.CPU
+            if ray.get(worker.get_worker_type.remote()) == WorkerType.CPU  # type:ignore
         ]
 
         self.logger.debug(f"{len(self.gpu_workers)=}")
         self.logger.debug(f"{len(self.cpu_workers)=}")
 
-    def assign_trial_to_worker(self) -> List[ObjectRef]:
+    def assign_trial_to_worker(self) -> None:  # type: ignore
         """
         將一個試驗分配給一個可用的工作者。
 
@@ -215,25 +227,37 @@ class TrialScheduler:
             List[ObjectRef]: 當前正在運行的訓練任務列表。
         """
         self.update_phase()
+
         if self.pending_trial_states:
             pending_trial_list = sorted(
                 self.pending_trial_states, key=lambda t: t.iteration
             )
             pending_trial_id_list = [i.id for i in pending_trial_list]
             self.logger.info(
-                f"⏳ 等待中訓練任務列表長度：{len(pending_trial_list):2d} <{pending_trial_list[0].iteration} - {pending_trial_list[-1].iteration}> {pending_trial_id_list}"
+                f"⏳ 等待中訓練任務列表長度：{len(pending_trial_list):2d}, {pending_trial_id_list}"
             )
+
+        future: Optional[ObjectRef] = None
+        if (
+            len(self.completed_trial_states)
+            <= self.trial_state_nums - len(self.gpu_workers) * 3
+        ):
             future = round_robin_strategy(
                 pending_trial_states=self.pending_trial_states,
                 gpu_workers=self.gpu_workers,
                 cpu_workers=self.cpu_workers,
                 trial_phase=self.trial_phase,
             )
-            if future is not None:
-                self.running_futures.append(future)
-            return self.running_futures
+        else:
+            gpu_first_strategy(
+                self.pending_trial_states,
+                self.gpu_workers,
+                self.cpu_workers,
+                logger=self.logger,
+            )
 
-        gpu_first_strategy(self.gpu_workers, self.cpu_workers, logger=self.logger)
+        if future is not None:
+            self.running_futures.append(future)
 
     def run(self):
         """
@@ -245,19 +269,19 @@ class TrialScheduler:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
-        while self.running_futures or self.pending_trial_states:
+        # while self.running_futures or self.pending_trial_states:
+        while len(self.completed_trial_states) < self.trial_state_nums:
             self.assign_trial_to_worker()
 
             if not self.running_futures and not self.pending_trial_states:
                 break
 
             done_futures, self.running_futures = ray.wait(
-                self.running_futures, timeout=2.0
+                self.running_futures, timeout=0.5
             )
 
             if done_futures:
                 loop.run_until_complete(self.handle_done_futures(done_futures))
-                # asyncio.create_task(self.handle_done_futures(done_futures))
 
         self.print_iteration_count()
         self.logger.info("🎉 所有 Trial 訓練完成！")
@@ -307,14 +331,14 @@ class TrialScheduler:
             return
 
         for worker in self.workers:
-            future = ray.get(worker.get_log_file.remote())
+            future = ray.get(worker.get_log_file.remote())  # type: ignore
             with open(os.path.join(log_dir, f"worker-{future['id']}.log"), "w") as f:
                 f.write(future["content"])
 
     def update_phase(self):
         old = self.trial_phase.current_phase
 
-        self.trial_phase.update_phase(ray.get(self.tuner.get_trial_progress.remote()))
+        self.trial_phase.update_phase(ray.get(self.tuner.get_trial_progress.remote()))  # type: ignore
 
         if old != self.trial_phase.current_phase:
             self.logger.info(f"更新階段到Phase {self.trial_phase.current_phase}")
@@ -322,7 +346,7 @@ class TrialScheduler:
                 worker.update_phase.remote(self.trial_phase.current_phase)
                 for worker in self.workers
             ]
-            ray.get(futures)
+            ray.get(futures)  # type: ignore
 
     async def handle_done_futures(self, done_futures: List[ObjectRef]):
         """
@@ -345,12 +369,9 @@ class TrialScheduler:
                     )
 
                 elif trial_state.status == TrialStatus.NEED_MUTATION:
-                    trial_state = ray.get(self.tuner.mutation.remote(trial_state))
+                    trial_state = ray.get(self.tuner.mutation.remote(trial_state))  # type: ignore
                     trial_state.status = TrialStatus.PENDING
                     self.pending_trial_states.append(trial_state)
-                    self.logger.info(
-                        f"🔃 Worker {trial_state.worker_id} 回傳未完成 Trial {trial_state.id}, Iteration: {trial_state.iteration} ，Accuracy: {trial_state.accuracy:.2f}"
-                    )
 
                 elif trial_state.status == TrialStatus.PAUSE:
                     trial_state.status = TrialStatus.PENDING
