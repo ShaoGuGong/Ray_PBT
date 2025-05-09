@@ -10,13 +10,24 @@ import torch.optim as optim
 from ray.actor import ActorHandle
 from torch.utils.data import DataLoader
 
-from .config import (GPU_MAX_ITERATION, MUTATION_ITERATION, PHASE_ITERATION,
-                     STOP_ITERATION)
+from .config import (
+    GPU_MAX_ITERATION,
+    MUTATION_ITERATION,
+    PHASE_ITERATION,
+    STOP_ITERATION,
+)
 from .trial_phase import TrialPhase
 from .trial_state import TrialState
-from .utils import (Accuracy, TrainStepFunction, TrialStatus, WorkerState,
-                    WorkerType, get_data_loader, get_head_node_address,
-                    get_model)
+from .utils import (
+    Accuracy,
+    TrainStepFunction,
+    TrialStatus,
+    WorkerState,
+    WorkerType,
+    get_data_loader,
+    get_head_node_address,
+    get_model,
+)
 
 
 class WorkerLoggerFormatter(logging.Formatter):
@@ -151,7 +162,7 @@ class Worker:
         trial_state.status = TrialStatus.RUNNING
         trial_state.worker_id = self.worker_state.id
         trial_state.worker_type = self.worker_state.worker_type
-        ray.get(self.tuner.record_trial_progress.remote(trial_state))
+        ray.get(self.tuner.record_trial_progress.remote(trial_state))  # type: ignore
         self.log("info", f"執行中Trial: {[i for i in self.active_trials]}")
         return self.train(trial_state)
 
@@ -187,43 +198,52 @@ class Worker:
             TrialState: 訓練後的試驗狀態。
         """
         self.log("info", "開始訓練", trial_id=trial_state.id)
+        self.log("debug", f"{torch.cuda.is_available()=}")
 
-        hyper = trial_state.hyperparameter
-        checkpoint = trial_state.checkpoint
-        train_loader, test_loader, _ = get_data_loader(hyper.batch_size)
+        try:
+            hyper = trial_state.hyperparameter
+            checkpoint = trial_state.checkpoint
+            train_loader, test_loader, _ = get_data_loader(hyper.batch_size)
 
-        model = get_model(hyper.model_type)
-        model.load_state_dict(checkpoint.model_state_dict)
-        model.to(self.device)
+            model = get_model(hyper.model_type)
+            model.load_state_dict(checkpoint.model_state_dict)
+            model.to(self.device)
+
+            optimizer = optim.SGD(model.parameters(), lr=hyper.lr, momentum=hyper.momentum)  # type: ignore
+            optimizer.load_state_dict(checkpoint.optimizer_state_dict)
+
+            for param_group in optimizer.param_groups:
+                param_group["lr"] = hyper.lr
+                param_group["momentum"] = hyper.momentum
+        except Exception as e:
+            self.log("error", f"{type(e).__name__}: {e}", trial_state.id)
+            self.active_trials.pop(trial_state.id)
+            trial_state.status = TrialStatus.FAILED
+            return trial_state
 
         current_iteration = 0
-
-        optimizer = optim.SGD(model.parameters(), lr=hyper.lr, momentum=hyper.momentum)  # type: ignore
-        optimizer.load_state_dict(checkpoint.optimzer_state_dict)
-        for param_group in optimizer.param_groups:
-            param_group["lr"] = hyper.lr
-            param_group["momentum"] = hyper.momentum
-
         while True:
-            # if trial_state.accuracy > trial_state.stop_accuracy:
-            #     break
-            #
-            # if trial_state.iteration >= trial_state.stop_iteration:
-            #     trial_state.accuracy = self.test(model, test_loader)
-            #     break
+            if trial_state.accuracy > trial_state.stop_accuracy:
+                break
+
+            if trial_state.iteration >= trial_state.stop_iteration:
+                break
 
             if self.trial_phase.is_trial_exceeding(trial_state):
                 self.log(
                     "info", f"已超過當前階段 Phase{self.trial_phase.current_phase}"
                 )
                 self.pause_trial(trial_state)
+                trial_state.update_checkpoint(model, optimizer)
                 return trial_state
 
             if (
                 self.worker_state.worker_type == WorkerType.CPU
                 and trial_state.phase < self.trial_phase.current_phase
             ):
+                self.log("info", "已落後當前訓練階段")
                 self.pause_trial(trial_state)
+                trial_state.update_checkpoint(model, optimizer)
                 return trial_state
 
             if (
@@ -232,12 +252,14 @@ class Worker:
             ):
                 self.log("info", "已達到 GPU_MAX_ITERATION 次數")
                 self.pause_trial(trial_state)
+                trial_state.update_checkpoint(model, optimizer)
                 return trial_state
 
             if trial_state.id in self.interrupt_set:
                 self.log("info", "收到回傳訊號")
                 self.pause_trial(trial_state)
                 self.interrupt_set.remove(trial_state.id)
+                trial_state.update_checkpoint(model, optimizer)
                 return trial_state
 
             self.train_step(
@@ -249,50 +271,49 @@ class Worker:
             trial_state.device_iteration_count[self.worker_state.worker_type] += 1
             current_iteration += 1
 
-            if trial_state.iteration % self.mutation_iteration:
-                continue
-
-            trial_state.accuracy = self.test(model, test_loader)
-            ray.get(self.tuner.update_trial_result.remote(trial_state))  # type: ignore
-
-            self.log(
-                "info",
-                f"Phase: {trial_state.phase}, Iteration: {trial_state.iteration} Accuracy: {trial_state.accuracy}",
-                trial_id=trial_state.id,
-            )
-
             if trial_state.accuracy > trial_state.stop_accuracy:
                 break
 
             if trial_state.iteration >= trial_state.stop_iteration:
                 break
 
-            base_line = ray.get(
-                self.tuner.get_baseline.remote(iteration=trial_state.iteration)  # type: ignore
-            )
+            if (
+                trial_state.iteration != 0
+                and trial_state.iteration % self.mutation_iteration == 0
+            ):
+                trial_state.accuracy = self.test(model, test_loader)
+                ray.get(self.tuner.update_trial_result.remote(trial_state))  # type: ignore
 
-            if trial_state.accuracy >= base_line:
-                continue
-
-            self.log(
-                "info",
-                f"Accuracy:{trial_state.accuracy:.4f} < Base Line:{base_line:.4f}",
-                trial_id=trial_state.id,
-            )
-
-            if random.choice((False, False, True)):
                 self.log(
                     "info",
-                    f"↩️ 需要執行突變，已回傳",
+                    f"Phase: {trial_state.phase}, Iteration: {trial_state.iteration} Accuracy: {trial_state.accuracy}",
                     trial_id=trial_state.id,
                 )
 
-                self.need_mutation_trial(trial_state)
-                return trial_state
+                base_line = ray.get(
+                    self.tuner.get_baseline.remote(iteration=trial_state.iteration)  # type: ignore
+                )
+
+                if trial_state.accuracy < base_line:
+                    self.log(
+                        "info",
+                        f"Accuracy:{trial_state.accuracy:.4f} < Base Line:{base_line:.4f}",
+                        trial_id=trial_state.id,
+                    )
+
+                    if random.choice((False, False, True)):
+                        self.log(
+                            "info",
+                            f"↩️ 需要執行突變，已回傳",
+                            trial_id=trial_state.id,
+                        )
+
+                        self.need_mutation_trial(trial_state)
+                        return trial_state
 
         self.log("info", f"訓練結束", trial_id=trial_state.id)
         self.finish_trial(trial_state)
-
+        trial_state.update_checkpoint(model, optimizer)
         return trial_state
 
     def test(self, model: nn.Module, test_loader: DataLoader) -> Accuracy:
@@ -381,7 +402,7 @@ class Worker:
             self.logger.info(message, extra=extra)
             return
         if level == "debug":
-            self.logger.info(message, extra=extra)
+            self.logger.debug(message, extra=extra)
             return
         if level == "warning":
             self.logger.warning(message, extra=extra)

@@ -26,6 +26,69 @@ class AssignTrialStrategy(Protocol):
     ) -> List[ObjectRef]: ...
 
 
+def cpu_scheduling(
+    pending_trial_states: List[TrialState],
+    cpu_workers: List[ActorHandle],
+    trial_phase: TrialPhase,
+):
+    if not pending_trial_states:
+        return None
+
+    available_futures = [worker.get_available_slots.remote() for worker in cpu_workers]
+
+    available_cpu_workers = [
+        worker
+        for worker, available_slots in zip(cpu_workers, ray.get(available_futures))  # type: ignore
+        if available_slots
+    ]
+
+    if not available_cpu_workers:
+        return None
+
+    available_trials = [
+        trial
+        for trial in pending_trial_states
+        if trial.phase <= trial_phase.current_phase
+    ]
+
+    if not available_trials:
+        return None
+
+    trial_state = max(available_trials, key=lambda x: x.iteration)
+    worker = next(iter(available_cpu_workers))
+    pending_trial_states.remove(trial_state)
+    future = worker.assign_trial.remote(trial_state)
+
+    return future
+
+
+def gpu_scheduling(
+    pending_trial_states: List[TrialState],
+    gpu_workers: List[ActorHandle],
+):
+    if not pending_trial_states:
+        return None
+
+    available_futures = [worker.get_available_slots.remote() for worker in gpu_workers]
+
+    available_gpu_workers = [
+        (worker, available_slots)
+        for worker, available_slots in zip(gpu_workers, ray.get(available_futures))  # type: ignore
+        if available_slots
+    ]
+
+    if not available_gpu_workers:
+        return None
+
+    worker = max(available_gpu_workers, key=lambda x: x[1])[0]
+    trial_state = min(pending_trial_states, key=lambda x: x.iteration)
+
+    pending_trial_states.remove(trial_state)
+    future = worker.assign_trial.remote(trial_state)
+
+    return future
+
+
 def round_robin_strategy(
     pending_trial_states: List[TrialState],
     gpu_workers: List[ActorHandle],
@@ -83,32 +146,11 @@ def round_robin_strategy(
         return future
 
 
-def gpu_first_strategy(
-    pending_trial_states: List[TrialState],
-    gpu_workers: List[ActorHandle],
+def gpu_stealing_strategy(
     cpu_workers: List[ActorHandle],
     **kargs: Any,
 ) -> Optional[ObjectRef]:
     logger = kargs["logger"]
-
-    available_futures = [worker.get_available_slots.remote() for worker in gpu_workers]
-    available_gpu_workers = [
-        (worker, available_slots)
-        for worker, available_slots in zip(gpu_workers, ray.get(available_futures))  # type: ignore
-        if available_slots
-    ]
-
-    if not available_gpu_workers:
-        return None
-
-    if len(pending_trial_states):
-        worker = max(available_gpu_workers, key=lambda x: x[1])[0]
-        trial_state = min(pending_trial_states, key=lambda x: x.iteration)
-
-        pending_trial_states.remove(trial_state)
-        future = worker.assign_trial.remote(trial_state)
-
-        return future
 
     available_futures = [worker.get_active_trials.remote() for worker in cpu_workers]
 
@@ -194,12 +236,13 @@ class TrialScheduler:
         self.pending_trial_states: List[TrialState] = trial_states
         self.completed_trial_states: List[TrialState] = []
         self.waiting_trial_states: List[TrialState] = []
-        self.trial_state_nums = len(self.pending_trial_states)
+        self.trial_state_nums: int = len(self.pending_trial_states)
 
         self.running_futures: List[ObjectRef] = []
-        self.logger = get_trial_scheduler_logger()
-        self.workers = workers
-        self._previous_time = time.time()
+        self.logger: logging.Logger = get_trial_scheduler_logger()
+        self.workers: List[ActorHandle] = workers
+        self._previous_time: float = time.time()
+        self.is_final_phase: bool = False
 
         self.gpu_workers = [
             worker
@@ -228,6 +271,13 @@ class TrialScheduler:
         """
         self.update_phase()
 
+        if not self.is_final_phase:
+            if len(self.pending_trial_states) + len(self.running_futures) < (
+                len(self.gpu_workers) * 3 + len(self.cpu_workers)
+            ):
+                self.logger.info("已到最後階段 開始執行搶奪")
+                self.is_final_phase = True
+
         if self.pending_trial_states:
             pending_trial_list = sorted(
                 self.pending_trial_states, key=lambda t: t.iteration
@@ -237,27 +287,25 @@ class TrialScheduler:
                 f"⏳ 等待中訓練任務列表長度：{len(pending_trial_list):2d}, {pending_trial_id_list}"
             )
 
-        future: Optional[ObjectRef] = None
-        if (
-            len(self.completed_trial_states)
-            <= self.trial_state_nums - len(self.gpu_workers) * 3
-        ):
-            future = round_robin_strategy(
-                pending_trial_states=self.pending_trial_states,
-                gpu_workers=self.gpu_workers,
-                cpu_workers=self.cpu_workers,
-                trial_phase=self.trial_phase,
+        if not self.is_final_phase:
+            future = cpu_scheduling(
+                self.pending_trial_states, self.cpu_workers, self.trial_phase
             )
-        else:
-            gpu_first_strategy(
-                self.pending_trial_states,
-                self.gpu_workers,
-                self.cpu_workers,
-                logger=self.logger,
-            )
+            if future:
+                self.running_futures.append(future)
+                return
 
-        if future is not None:
-            self.running_futures.append(future)
+            future = gpu_scheduling(self.pending_trial_states, self.gpu_workers)
+            if future:
+                self.running_futures.append(future)
+                return
+
+        else:
+            future = gpu_scheduling(self.pending_trial_states, self.gpu_workers)
+            if future:
+                self.running_futures.append(future)
+                return
+            gpu_stealing_strategy(self.cpu_workers, logger=self.logger)
 
     def run(self):
         """
@@ -302,7 +350,7 @@ class TrialScheduler:
             )
 
         print(
-            f"Total   CPU/GPU",
+            f"Total    CPU/GPU",
             colored_progress_bar(
                 [
                     sum(i[1][WorkerType.CPU] for i in iteration_counts),
@@ -383,6 +431,12 @@ class TrialScheduler:
                 elif trial_state.status == TrialStatus.PENDING:
                     self.pending_trial_states.append(trial_state)
                     self.logger.warning(f"❗發生碰撞, 回傳 Trial {trial_state.id}")
+
+                elif trial_state.status == TrialStatus.FAILED:
+                    self.completed_trial_states.append(trial_state)
+                    self.logger.warning(
+                        f"Worker {trial_state.worker_id} Trial {trial_state.id} 發生錯誤, 已中止訓練"
+                    )
 
                 trial_state.worker_id = -1
                 trial_state.worker_type = None

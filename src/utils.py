@@ -4,7 +4,7 @@ import zipfile
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import reduce
-from typing import Any, Callable, List, Optional, Protocol, TypeVar
+from typing import Any, Callable, Dict, List, Optional, Protocol, TypeVar
 
 import numpy as np
 import ray
@@ -46,6 +46,7 @@ class TrialStatus(Enum):
     TERMINATE = auto()
     PAUSE = auto()
     NEED_MUTATION = auto()
+    FAILED = auto()
 
     def __str__(self):
         return self.name
@@ -100,9 +101,8 @@ class Hyperparameter:
 
 @dataclass
 class Checkpoint:
-    model_state_dict: dict
-    optimzer_state_dict: dict
-    checkpoint_interval: int
+    model_state_dict: Dict
+    optimizer_state_dict: Dict
 
 
 # ╭──────────────────────────────────────────────────────────╮
@@ -181,7 +181,7 @@ def get_data_loader(
     valid_dataset = Subset(test_dataset, valid_indices.tolist())
     test_dataset = Subset(test_dataset, test_indices.tolist())
 
-    print(f"{len(train_dataset)=}, {len(valid_dataset)=}, {len(test_dataset)=}")
+    # print(f"{len(train_dataset)=}, {len(valid_dataset)=}, {len(test_dataset)=}")
 
     train_loader = DataLoader(
         train_dataset,

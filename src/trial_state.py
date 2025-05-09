@@ -1,6 +1,7 @@
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
+import torch
 import torch.optim as optim
 
 from .config import (STOP_ACCURACY, STOP_ITERATION, TRIAL_PROGRESS_OUTPUT_PATH,
@@ -28,17 +29,17 @@ class TrialState:
         self.device_iteration_count = {WorkerType.CPU: 0, WorkerType.GPU: 0}
 
         model = get_model(self.hyperparameter.model_type)
-        optimizer = optim.SGD(
+        optimizer = optim.SGD(  # type: ignore
             model.parameters(),
             lr=self.hyperparameter.lr,
             momentum=self.hyperparameter.momentum,
         )
 
-        self.checkpoint = Checkpoint(
+        self.checkpoint: Checkpoint = Checkpoint(
             model.state_dict(),
             optimizer.state_dict(),
-            0,
         )
+        self.update_checkpoint(model, optimizer)
 
         self.accuracy = 0.0
         self.stop_accuracy = STOP_ACCURACY
@@ -46,6 +47,23 @@ class TrialState:
     def __str__(self) -> str:
         result = f"{'Trial: '+str(self.id):=^40}\n Hyperparameter: {str(self.hyperparameter)}\n status: {self.status}\n iteration: {self.iteration} \n stop_iteration: {self.stop_iteration} \n{'':=^40}"
         return result
+
+    def update_checkpoint(self, model, optimizer):
+        self.checkpoint.model_state_dict = model.cpu().state_dict()
+        # 取得 state_dict
+        # model_state_dict = model.state_dict()
+        optimizer_state_dict = optimizer.state_dict()
+
+        # # 如果是在 CUDA，轉到 CPU 儲存
+        # model_state_dict = {k: v.cpu() for k, v in model_state_dict.items()}
+        for state in optimizer_state_dict["state"].values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.cpu()
+        #
+        # # 儲存回 checkpoint
+        # self.checkpoint.model_state_dict = model_state_dict
+        self.checkpoint.optimizer_state_dict = optimizer_state_dict
 
 
 class TrialResult:
@@ -155,19 +173,19 @@ class TrialResult:
         try:
             with open(output_path, "w") as f:
                 f.write(
-                    f"┏{'':━^4}┳{'':━^11}┳{'':━^11}┳{'':━^37}┳{'':━^5}┳{'':━^7}┳{'':━^7}┓\n"
+                    f"┏{'':━^4}┳{'':━^11}┳{'':━^11}┳{'':━^37}┳{'':━^3}┳{'':━^7}┳{'':━^7}┓\n"
                 )
                 f.write(
-                    f"┃{'':^4}┃{'':^11}┃{'Worker':^11}┃{'Hyparameter':^37}┃{'':^5}┃{'':^7}┃{'':^7}┃\n"
+                    f"┃{'':^4}┃{'':^11}┃{'Worker':^11}┃{'Hyparameter':^37}┃{'':^3}┃{'':^7}┃{'':^7}┃\n"
                 )
                 f.write(
-                    f"┃{'ID':^4}┃{'Status':^11}┣{'':━^4}┳{'':━^6}╋{'':━^7}┳{'':━^10}┳{'':━^6}┳{'':━^11}┫{'Phase':^5}┃{'Iter':^7}┃{'Acc':^7}┃\n"
+                    f"┃{'ID':^4}┃{'Status':^11}┣{'':━^4}┳{'':━^6}╋{'':━^7}┳{'':━^10}┳{'':━^6}┳{'':━^11}┫{'Ph':^3}┃{'Iter':^7}┃{'Acc':^7}┃\n"
                 )
                 f.write(
-                    f"┃{'':^4}┃{'':^11}┃{'ID':^4}┃{'TYPE':^6}┃{'lr':^7}┃{'momentum':^10}┃{'bs':^6}┃{'model':^11}┃{'':^5}┃{'':^7}┃{'':^7}┃\n"
+                    f"┃{'':^4}┃{'':^11}┃{'ID':^4}┃{'TYPE':^6}┃{'lr':^7}┃{'momentum':^10}┃{'bs':^6}┃{'model':^11}┃{'':^3}┃{'':^7}┃{'':^7}┃\n"
                 )
                 f.write(
-                    f"┣{'':━^4}╋{'':━^11}╋{'':━^4}╋{'':━^6}╋{'':━^7}╋{'':━^10}╋{'':━^6}╋{'':━^11}╋{'':━^5}╋{'':━^7}╋{'':━^7}┫\n"
+                    f"┣{'':━^4}╋{'':━^11}╋{'':━^4}╋{'':━^6}╋{'':━^7}╋{'':━^10}╋{'':━^6}╋{'':━^11}╋{'':━^3}╋{'':━^7}╋{'':━^7}┫\n"
                 )
 
                 for i in self.trial_progress.values():
@@ -177,14 +195,14 @@ class TrialResult:
                     elif i.worker_type == WorkerType.GPU:
                         worker_type = "GPU"
                     h = i.hyperparameter
-                    worker_id = i.worker_id
-                    if i.worker_id == -1:
-                        worker_id = ""
+                    worker_id = ""
+                    if i.worker_id != -1:
+                        worker_id = i.worker_id
                     f.write(
-                        f"┃{i.id:>4}┃{i.status:^11}┃{worker_id:>4}┃{worker_type:^6}┃{h.lr:>7.3f}┃{h.momentum:>10.3f}┃{h.batch_size:>6}┃{h.model_type:^11}┃{i.phase:>5}┃{i.iteration:>7}┃{i.accuracy:>7.3f}┃\n"
+                        f"┃{i.id:>4}┃{i.status:^11}┃{worker_id:>4}┃{worker_type:^6}┃{h.lr:>7.3f}┃{h.momentum:>10.3f}┃{h.batch_size:>6}┃{h.model_type:^11}┃{i.phase:>3}┃{i.iteration:>7}┃{i.accuracy:>7.3f}┃\n"
                     )
                 f.write(
-                    f"┗{'':━^4}┻{'':━^11}┻{'':━^4}┻{'':━^6}┻{'':━^7}┻{'':━^10}┻{'':━^6}┻{'':━^11}┻{'':━^5}┻{'':━^7}┻{'':━^7}┛\n"
+                    f"┗{'':━^4}┻{'':━^11}┻{'':━^4}┻{'':━^6}┻{'':━^7}┻{'':━^10}┻{'':━^6}┻{'':━^11}┻{'':━^3}┻{'':━^7}┻{'':━^7}┛\n"
                 )
 
         except Exception as e:

@@ -45,7 +45,7 @@ if __name__ == "__main__":
         }
     )
     trial_states = generate_trial_states(40)
-    tuner = Tuner.options(
+    tuner = Tuner.options(  # type: ignore
         max_concurrency=3,
         num_cpus=1,
         resources={f"node:{get_head_node_address()}": 0.01},
