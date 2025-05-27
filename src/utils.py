@@ -1,20 +1,14 @@
-import os
 import random
 import zipfile
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import reduce
-from typing import Any, Callable, Dict, List, Optional, Protocol, TypeVar
+from typing import Any, Callable, Dict, List, Protocol, Tuple, TypeVar
 
-import numpy as np
 import ray
 import torch.nn as nn
-import torchvision
 import torchvision.models as models
-import torchvision.transforms as transforms
-from torch.utils.data import DataLoader, Subset
-
-from .config import DATASET_PATH
+from torch.utils.data import DataLoader
 
 # ╭──────────────────────────────────────────────────────────╮
 # │                       Type Define                        │
@@ -25,6 +19,13 @@ Accuracy = float
 
 class TrainStepFunction(Protocol):
     def __call__(self, *args: Any, **kwargs: Any) -> None: ...
+
+
+class DataLoaderFactory(Protocol):
+    def __call__(
+        self,
+        batch_size: int,
+    ) -> Tuple[DataLoader, DataLoader, DataLoader]: ...
 
 
 # ╭──────────────────────────────────────────────────────────╮
@@ -125,83 +126,6 @@ def pipe(*functions: Composeable) -> Composeable:
         return fn(value)
 
     return lambda data: reduce(apply, functions, data)
-
-
-def get_data_loader(
-    batch_size: int = 64,
-    train_transform: Optional[transforms.Compose] = None,
-    test_transform: Optional[transforms.Compose] = None,
-    data_dir: str = DATASET_PATH,
-) -> tuple:
-    data_dir = os.path.expanduser(data_dir)
-    if not os.path.exists(data_dir):
-        os.makedirs(data_dir)
-
-    if not os.path.exists(os.path.join(data_dir, "cifar-10-batches-py")):
-        print(f"{os.path.join(data_dir, 'cifar-10-batches-py')} 不存在")
-        torchvision.datasets.CIFAR10(
-            root=data_dir, train=True, download=True, transform=None
-        )
-
-    if train_transform is None:
-        train_transform = transforms.Compose(
-            [
-                transforms.RandomCrop(32, padding=4),
-                transforms.RandomHorizontalFlip(),
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    (0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)
-                ),
-            ]
-        )
-
-    if test_transform is None:
-        test_transform = transforms.Compose(
-            [
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    (0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)
-                ),
-            ]
-        )
-
-    train_dataset = torchvision.datasets.CIFAR10(
-        root=data_dir, train=True, download=False, transform=train_transform
-    )
-    test_dataset = torchvision.datasets.CIFAR10(
-        root=data_dir, train=False, download=False, transform=test_transform
-    )
-
-    np.random.seed(42)
-    indices = np.random.permutation(len(test_dataset))
-    test_size = len(test_dataset) // 2
-    test_indices = indices[:test_size]
-    valid_indices = indices[test_size:]
-
-    valid_dataset = Subset(test_dataset, valid_indices.tolist())
-    test_dataset = Subset(test_dataset, test_indices.tolist())
-
-    # print(f"{len(train_dataset)=}, {len(valid_dataset)=}, {len(test_dataset)=}")
-
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-    )
-
-    valid_loader = DataLoader(
-        valid_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-    )
-
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-    )
-
-    return train_loader, valid_loader, test_loader
 
 
 def get_model(model_type: ModelType):

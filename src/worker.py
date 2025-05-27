@@ -10,24 +10,13 @@ import torch.optim as optim
 from ray.actor import ActorHandle
 from torch.utils.data import DataLoader
 
-from .config import (
-    GPU_MAX_ITERATION,
-    MUTATION_ITERATION,
-    PHASE_ITERATION,
-    STOP_ITERATION,
-)
+from .config import (GPU_MAX_ITERATION, MUTATION_ITERATION, PHASE_ITERATION,
+                     STOP_ITERATION)
 from .trial_phase import TrialPhase
 from .trial_state import TrialState
-from .utils import (
-    Accuracy,
-    TrainStepFunction,
-    TrialStatus,
-    WorkerState,
-    WorkerType,
-    get_data_loader,
-    get_head_node_address,
-    get_model,
-)
+from .utils import (Accuracy, DataLoaderFactory, TrainStepFunction,
+                    TrialStatus, WorkerState, WorkerType,
+                    get_head_node_address, get_model)
 
 
 class WorkerLoggerFormatter(logging.Formatter):
@@ -118,6 +107,7 @@ class Worker:
         train_step: TrainStepFunction,
         tuner: ActorHandle,
         trial_phase: TrialPhase,
+        dataloader_factory: DataLoaderFactory,
     ) -> None:
         """
         初始化 Worker，設定狀態與參數。
@@ -137,6 +127,7 @@ class Worker:
         self.mutation_iteration: int = MUTATION_ITERATION
         self.interrupt_set: set = set()
         self.trial_phase: TrialPhase = trial_phase
+        self.dataloader_factory = dataloader_factory
 
     def send_signal(self, trial_id: int) -> None:
         if trial_id not in self.active_trials.keys():
@@ -203,7 +194,7 @@ class Worker:
         try:
             hyper = trial_state.hyperparameter
             checkpoint = trial_state.checkpoint
-            train_loader, test_loader, _ = get_data_loader(hyper.batch_size)
+            train_loader, test_loader, _ = self.dataloader_factory(hyper.batch_size)
 
             model = get_model(hyper.model_type)
             model.load_state_dict(checkpoint.model_state_dict)
@@ -429,7 +420,9 @@ class Worker:
 
 
 def generate_all_workers(
-    tuner: ActorHandle, train_step: TrainStepFunction
+    tuner: ActorHandle,
+    train_step: TrainStepFunction,
+    dataloader_factory: DataLoaderFactory,
 ) -> List[ActorHandle]:
     """
     根據 Ray 叢集的節點資源建立所有 Worker。
@@ -506,6 +499,7 @@ def generate_all_workers(
                 train_step=train_step,
                 tuner=tuner,
                 trial_phase=TrialPhase(STOP_ITERATION, PHASE_ITERATION),
+                dataloader_factory=dataloader_factory,
             )
         )
 
