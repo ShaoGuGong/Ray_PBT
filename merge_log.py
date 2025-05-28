@@ -21,7 +21,7 @@ def merge_logs_by_timestamp(input_dir: str, output_file: str):
             continue
 
         print(f"開始讀取{dirpath}")
-        if not os.path.exists(os.path.join(dirpath, output_file)):
+        if os.path.exists(os.path.join(dirpath, output_file)):
             continue
 
         for filename in os.listdir(dirpath):

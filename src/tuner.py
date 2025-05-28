@@ -1,5 +1,4 @@
 import logging
-import math
 import os
 import random
 import zipfile
@@ -10,7 +9,8 @@ import ray
 
 from .trial_scheduler import TrialScheduler
 from .trial_state import TrialResult, TrialState
-from .utils import Hyperparameter, TrainStepFunction, WorkerType
+from .utils import (DataLoaderFactory, Hyperparameter, TrainStepFunction,
+                    WorkerType)
 from .worker import generate_all_workers
 
 
@@ -52,6 +52,7 @@ class Tuner:
         self,
         trial_states: List[TrialState],
         train_step: TrainStepFunction,
+        dataloader_factory: DataLoaderFactory,
     ) -> None:
         self.trial_states = trial_states
         self.logger = get_tuner_logger()
@@ -60,7 +61,9 @@ class Tuner:
         self.logger.info("\n".join([str(t.hyperparameter) for t in trial_states]))
 
         self.workers = generate_all_workers(
-            ray.get_runtime_context().current_actor, train_step=train_step
+            ray.get_runtime_context().current_actor,
+            train_step=train_step,
+            dataloader_factory=dataloader_factory,
         )
 
         self.scheduler: TrialScheduler = TrialScheduler(
@@ -86,6 +89,15 @@ class Tuner:
     def record_trial_progress(self, trial_state: TrialState):
         self.trial_result.record_trial_progress(trial_state)
         self.trial_result.display_trial_progress()
+
+    def quantile(
+        self, quantile_ratio: float
+    ) -> Tuple[List[TrialState], List[TrialState]]:
+        trials = [i for i in self.get_trial_progress() if i.accuracy != 0].sort(
+            key=lambda x: x.accuracy
+        )
+        raise NotImplementedError
+        return ([], [])
 
     def mutation(self, trial_state: TrialState) -> TrialState:
         self.logger.info(
@@ -120,6 +132,7 @@ class Tuner:
             f"Trial-{trial_state.id} Iter-{trial_state.iteration}, 結束mutation, 新超參數: {trial_state.hyperparameter}"
         )
 
+        raise NotImplementedError
         return trial_state
 
     def get_baseline(self, iteration):
