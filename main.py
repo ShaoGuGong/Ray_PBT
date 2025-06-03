@@ -1,6 +1,7 @@
 import os
 from datetime import datetime
 from itertools import islice
+from random import shuffle
 from typing import List, Tuple
 
 import numpy as np
@@ -53,14 +54,14 @@ def cifar10_data_loader_factory(
         root=data_dir, train=False, download=False, transform=test_transform
     )
 
-    np.random.seed(42)
-    indices = np.random.permutation(len(test_dataset))
-    test_size = len(test_dataset) // 2
-    test_indices = indices[:test_size]
-    valid_indices = indices[test_size:]
-
-    valid_dataset = Subset(test_dataset, valid_indices.tolist())
-    test_dataset = Subset(test_dataset, test_indices.tolist())
+    # np.random.seed(42)
+    # indices = np.random.permutation(len(test_dataset))
+    # test_size = len(test_dataset) // 2
+    # test_indices = indices[:test_size]
+    # valid_indices = indices[test_size:]
+    #
+    # valid_dataset = Subset(test_dataset, valid_indices.tolist())
+    # test_dataset = Subset(test_dataset, test_indices.tolist())
 
     # print(f"{len(train_dataset)=}, {len(valid_dataset)=}, {len(test_dataset)=}")
 
@@ -69,20 +70,26 @@ def cifar10_data_loader_factory(
         batch_size=batch_size,
         shuffle=True,
     )
-
     valid_loader = DataLoader(
-        valid_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-    )
-
-    test_loader = DataLoader(
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
     )
 
-    return train_loader, valid_loader, test_loader
+    # valid_loader = DataLoader(
+    #     valid_dataset,
+    #     batch_size=batch_size,
+    #     shuffle=True,
+    # )
+    #
+    # test_loader = DataLoader(
+    #     test_dataset,
+    #     batch_size=batch_size,
+    #     shuffle=False,
+    # )
+
+    # return train_loader, valid_loader, test_loader
+    return train_loader, valid_loader, None
 
 
 def generate_trial_states(n: int = 1) -> List[TrialState]:
@@ -100,7 +107,7 @@ def train_step(model, optimizer, train_loader, batch_size, device=torch.device("
     model.train()
     criterion = nn.CrossEntropyLoss().to(device)
 
-    for inputs, targets in islice(train_loader, 1024 // batch_size):
+    for inputs, targets in islice(train_loader, 1):
         inputs, targets = inputs.to(device), targets.to(device)
         optimizer.zero_grad()
         outputs = model(inputs)
@@ -118,7 +125,7 @@ if __name__ == "__main__":
     )
     trial_states = generate_trial_states(40)
     tuner = Tuner.options(  # type: ignore
-        max_concurrency=3,
+        max_concurrency=16,
         num_cpus=1,
         resources={f"node:{get_head_node_address()}": 0.01},
     ).remote(trial_states, train_step, cifar10_data_loader_factory)

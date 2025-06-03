@@ -9,18 +9,16 @@ import ray
 
 from .trial_scheduler import TrialScheduler
 from .trial_state import TrialResult, TrialState
-from .utils import (DataLoaderFactory, Hyperparameter, TrainStepFunction,
-                    WorkerType)
+from .utils import DataloaderFactory, TrainStepFunction, WorkerType
 from .worker import generate_all_workers
 
 
 def get_tuner_logger() -> logging.Logger:
-
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_dir = os.path.join(os.getcwd(), "logs/", timestamp)
     os.makedirs(log_dir, exist_ok=True)
 
-    logger = logging.getLogger(f"Tuner")
+    logger = logging.getLogger("Tuner")
 
     if not logger.handlers:
         logger.setLevel(logging.DEBUG)  # 或者選擇更合適的級別
@@ -35,7 +33,7 @@ def get_tuner_logger() -> logging.Logger:
         stream_handler.setFormatter(formatter)
         logger.addHandler(stream_handler)
 
-        file_handler = logging.FileHandler(os.path.join(log_dir, f"tuner.log"))
+        file_handler = logging.FileHandler(os.path.join(log_dir, "tuner.log"))
         file_handler.setLevel(logging.DEBUG)  # 記錄所有級別的日誌
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
@@ -52,7 +50,7 @@ class Tuner:
         self,
         trial_states: List[TrialState],
         train_step: TrainStepFunction,
-        dataloader_factory: DataLoaderFactory,
+        dataloader_factory: DataloaderFactory,
     ) -> None:
         self.trial_states = trial_states
         self.logger = get_tuner_logger()
@@ -72,13 +70,13 @@ class Tuner:
         self.trial_result: TrialResult = TrialResult()
 
         for trial in self.trial_states:
-            self.trial_result.record_trial_progress(trial)
+            self.trial_result.record_trial_progress(trial.without_checkpoint())
 
     def run(self) -> None:
         self.logger.info("開始訓練")
         self.scheduler.run()
-        self.scheduler.get_workers_logs()
         self.logger.info("結束訓練")
+        self.scheduler.get_workers_logs()
 
     def update_trial_result(self, trial_state: TrialState):
         self.trial_result.update_trial_result(trial_state)
@@ -86,31 +84,33 @@ class Tuner:
             f"History Best: {self.trial_result.history_best[0]} {self.trial_result.history_best[1]}"
         )
 
-    def record_trial_progress(self, trial_state: TrialState):
+    def get_quantile_trial(
+        self, ratio: float = 0.25
+    ) -> Tuple[List[TrialState], List[TrialState]]:
+        return self.trial_result.get_quantile(ratio)
+
+    def record_trial_progress(self, trial_state: TrialState) -> None:
         self.trial_result.record_trial_progress(trial_state)
         self.trial_result.display_trial_progress()
-
-    def quantile(
-        self, quantile_ratio: float
-    ) -> Tuple[List[TrialState], List[TrialState]]:
-        trials = [i for i in self.get_trial_progress() if i.accuracy != 0].sort(
-            key=lambda x: x.accuracy
-        )
-        raise NotImplementedError
-        return ([], [])
 
     def mutation(self, trial_state: TrialState) -> TrialState:
         self.logger.info(
             f"Trial {trial_state.id}: 執行mutation, 原始超參數: {trial_state.hyperparameter}"
         )
 
-        # _, hyperparameter, _ = self.trial_result.get_history_best_result()
-        hyperparameters = [
-            result[1]
-            for result in self.trial_result.get_top_k_result(trial_state.iteration, 10)
-        ]
+        lower_quantile, upper_quantile = self.get_quantile_trial()
 
-        hyperparameter = Hyperparameter.random()
+        hyperparameter = random.choice(upper_quantile).hyperparameter
+        hyperparameter.lr *= 0.8
+        hyperparameter.momentum *= 1.2
+
+        # _, hyperparameter, _ = self.trial_result.get_history_best_result()
+        # hyperparameters = [
+        #     result[1]
+        #     for result in self.trial_result.get_top_k_result(trial_state.iteration, 10)
+        # ]
+
+        # hyperparameter = Hyperparameter.random()
         # hyperparameter.lr = (
         #     trial_state.hyperparameter.lr
         #     * 0.5
@@ -120,11 +120,11 @@ class Tuner:
         #         + math.cos(math.pi * trial_state.iteration / trial_state.stop_iteration)
         #     )
         # )
-        if len(hyperparameters) >= 3:
-            random_hyperparameters = random.sample(hyperparameters, 3)
-            hyperparameter.lr = random_hyperparameters[0].lr * 0.8
-            hyperparameter.momentum = random_hyperparameters[1].momentum
-            hyperparameter.batch_size = random_hyperparameters[2].batch_size
+        # if len(hyperparameters) >= 3:
+        #     random_hyperparameters = random.sample(hyperparameters, 2)
+        #     hyperparameter.lr = random_hyperparameters[0].lr * 0.8
+        #     hyperparameter.momentum = random_hyperparameters[1].momentum * 1.2
+        # hyperparameter.batch_size = random_hyperparameters[2].batch_size
 
         trial_state.hyperparameter = hyperparameter
 
@@ -132,10 +132,9 @@ class Tuner:
             f"Trial-{trial_state.id} Iter-{trial_state.iteration}, 結束mutation, 新超參數: {trial_state.hyperparameter}"
         )
 
-        raise NotImplementedError
         return trial_state
 
-    def get_baseline(self, iteration):
+    def get_baseline(self, iteration) -> float:
         return self.trial_result.get_mean_accuray(iteration)
 
     def get_min_iteration_trial(self) -> Tuple[int, int]:
@@ -149,6 +148,9 @@ class Tuner:
 
     def get_trial_progress(self) -> List[TrialState]:
         return self.trial_result.get_trial_progress()
+
+    def submit_trial(self, trial_state: TrialState) -> None:
+        self.scheduler.submit_trial(trial_state)
 
     def get_zipped_log(self) -> bytes:
         log_dir = None

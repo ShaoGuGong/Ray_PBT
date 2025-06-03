@@ -1,13 +1,17 @@
+import math
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.optim as optim
 
-from .config import (STOP_ACCURACY, STOP_ITERATION, TRIAL_PROGRESS_OUTPUT_PATH,
-                     TRIAL_RESULT_OUTPUT_PATH)
-from .utils import (Checkpoint, Hyperparameter, TrialStatus, WorkerType,
-                    get_model)
+from .config import (
+    STOP_ACCURACY,
+    STOP_ITERATION,
+    TRIAL_PROGRESS_OUTPUT_PATH,
+    TRIAL_RESULT_OUTPUT_PATH,
+)
+from .utils import Checkpoint, Hyperparameter, TrialStatus, WorkerType, get_model
 
 
 class TrialState:
@@ -16,6 +20,7 @@ class TrialState:
         id: int,
         hyperparameter: Hyperparameter,
         stop_iteration: int = STOP_ITERATION,
+        without_checkpoint: bool = False,
     ) -> None:
         self.id = id
         self.hyperparameter = hyperparameter
@@ -27,28 +32,30 @@ class TrialState:
         self.iteration = 0
         self.phase = 0
         self.device_iteration_count = {WorkerType.CPU: 0, WorkerType.GPU: 0}
+        self.checkpoint: Optional[Checkpoint] = None
 
-        model = get_model(self.hyperparameter.model_type)
-        optimizer = optim.SGD(  # type: ignore
-            model.parameters(),
-            lr=self.hyperparameter.lr,
-            momentum=self.hyperparameter.momentum,
-        )
+        if not without_checkpoint:
+            model = get_model(self.hyperparameter.model_type)
+            optimizer = optim.SGD(  # type: ignore
+                model.parameters(),
+                lr=self.hyperparameter.lr,
+                momentum=self.hyperparameter.momentum,
+            )
 
-        self.checkpoint: Checkpoint = Checkpoint(
-            model.state_dict(),
-            optimizer.state_dict(),
-        )
-        self.update_checkpoint(model, optimizer)
+            self.checkpoint: Optional[Checkpoint] = Checkpoint({}, {})
+            self.update_checkpoint(model, optimizer)
 
         self.accuracy = 0.0
         self.stop_accuracy = STOP_ACCURACY
 
     def __str__(self) -> str:
-        result = f"{'Trial: '+str(self.id):=^40}\n Hyperparameter: {str(self.hyperparameter)}\n status: {self.status}\n iteration: {self.iteration} \n stop_iteration: {self.stop_iteration} \n{'':=^40}"
+        result = f"{'Trial: ' + str(self.id):=^40}\n Hyperparameter: {str(self.hyperparameter)}\n status: {self.status}\n iteration: {self.iteration} \n stop_iteration: {self.stop_iteration} \n{'':=^40}"
         return result
 
-    def update_checkpoint(self, model, optimizer):
+    def update_checkpoint(self, model: Dict, optimizer: Dict) -> None:
+        if self.checkpoint is None:
+            self.checkpoint = Checkpoint({}, {})
+
         self.checkpoint.model_state_dict = model.cpu().state_dict()
         # 取得 state_dict
         # model_state_dict = model.state_dict()
@@ -64,6 +71,20 @@ class TrialState:
         # # 儲存回 checkpoint
         # self.checkpoint.model_state_dict = model_state_dict
         self.checkpoint.optimizer_state_dict = optimizer_state_dict
+
+    def without_checkpoint(self) -> "TrialState":
+        new_trial = TrialState(
+            self.id, self.hyperparameter, self.stop_iteration, without_checkpoint=True
+        )
+        new_trial.accuracy = self.accuracy
+        new_trial.iteration = self.iteration
+        new_trial.status = self.status
+        new_trial.worker_id = self.worker_id
+        new_trial.worker_type = self.worker_type
+        new_trial.run_time = self.run_time
+        new_trial.iteration = self.iteration
+        new_trial.phase = self.phase
+        return new_trial
 
 
 class TrialResult:
@@ -112,6 +133,23 @@ class TrialResult:
     ) -> Tuple[float, Optional[Hyperparameter], Optional[Checkpoint]]:
         return self.history_best
 
+    def get_quantile(
+        self, ratio: float = 0.25
+    ) -> Tuple[List[TrialState], List[TrialState]]:
+        trials = [
+            trial for trial in self.trial_progress.values() if trial.accuracy != 0
+        ]
+        if len(trials) < 2:
+            return [], []
+
+        trials.sort(key=lambda x: x.accuracy)
+        quantile_size = int(math.ceil(len(trials) * ratio))
+
+        if quantile_size > len(trials) / 2:
+            quantile_size: int = len(trials) // 2
+
+        return trials[:quantile_size], trials[-quantile_size:]
+
     def display_results(self, output_path: str = TRIAL_RESULT_OUTPUT_PATH) -> None:
         if not self.table:
             print("No results available")
@@ -138,11 +176,11 @@ class TrialResult:
 
                         f.write(f"┃{'':^4}┃{'':^8}┃{accuracy:^15.6f}┃{output:^35}┃\n")
 
-                    f.write(f"\033[s\033[{(len(top)+1)//2}A\033[8C")
-                    f.write(f"{'top-'+str(self.top_k):^4}\033[u")
+                    f.write(f"\033[s\033[{(len(top) + 1) // 2}A\033[8C")
+                    f.write(f"{'top-' + str(self.top_k):^4}\033[u")
 
                     if self.bottom_k == 0 or len(bot) == 0:
-                        f.write(f"\033[s\033[{(len(top)+len(bot)+2)//2}A\033[1C")
+                        f.write(f"\033[s\033[{(len(top) + len(bot) + 2) // 2}A\033[1C")
                         f.write(f"{iteration:^4}\033[u")
                         f.write(f"┣{'':━^4}╋{'':━^8}╋{'':━^15}╋{'':━^35}┫\n")
                         continue
@@ -154,9 +192,9 @@ class TrialResult:
                         output = f"lr:{hyper.lr:5.2f} momentum:{hyper.momentum:5.2f} batch:{hyper.batch_size:4}"
 
                         f.write(f"┃{'':^4}┃{'':^8}┃{accuracy:^15.6f}┃{output:^35}┃\n")
-                    f.write(f"\033[s\033[{(len(bot)+1)//2}A\033[8C")
-                    f.write(f"{'bot-'+str(self.bottom_k):^4}\033[u")
-                    f.write(f"\033[s\033[{(len(top)+len(bot)+2)//2}A\033[1C")
+                    f.write(f"\033[s\033[{(len(bot) + 1) // 2}A\033[8C")
+                    f.write(f"{'bot-' + str(self.bottom_k):^4}\033[u")
+                    f.write(f"\033[s\033[{(len(top) + len(bot) + 2) // 2}A\033[1C")
                     f.write(f"{iteration:^4}\033[u")
                     f.write(f"┣{'':━^4}╋{'':━^8}╋{'':━^15}╋{'':━^35}┫\n")
                 f.write(f"\033[A┗{'':━^4}┻{'':━^8}┻{'':━^15}┻{'':━^35}┛\n")

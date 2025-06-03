@@ -1,22 +1,33 @@
 import logging
 import os
-import random
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Union
 
 import ray
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from ray import ObjectRef
 from ray.actor import ActorHandle
 from torch.utils.data import DataLoader
 
-from .config import (GPU_MAX_ITERATION, MUTATION_ITERATION, PHASE_ITERATION,
-                     STOP_ITERATION)
+from .config import (
+    GPU_MAX_ITERATION,
+    MUTATION_ITERATION,
+    PHASE_ITERATION,
+    STOP_ITERATION,
+)
 from .trial_phase import TrialPhase
 from .trial_state import TrialState
-from .utils import (Accuracy, DataLoaderFactory, TrainStepFunction,
-                    TrialStatus, WorkerState, WorkerType,
-                    get_head_node_address, get_model)
+from .utils import (
+    Accuracy,
+    DataloaderFactory,
+    TrainStepFunction,
+    TrialStatus,
+    WorkerState,
+    WorkerType,
+    get_head_node_address,
+    get_model,
+)
 
 
 class WorkerLoggerFormatter(logging.Formatter):
@@ -107,7 +118,7 @@ class Worker:
         train_step: TrainStepFunction,
         tuner: ActorHandle,
         trial_phase: TrialPhase,
-        dataloader_factory: DataLoaderFactory,
+        dataloader_factory: DataloaderFactory,
     ) -> None:
         """
         初始化 Worker，設定狀態與參數。
@@ -122,12 +133,14 @@ class Worker:
         self.train_step: TrainStepFunction = train_step
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.logger = get_worker_logger(worker_id=worker_state.id)
-        self.log("info", "初始化完成")
-        self.tuner = tuner
+        self.tuner: ActorHandle = tuner
         self.mutation_iteration: int = MUTATION_ITERATION
         self.interrupt_set: set = set()
         self.trial_phase: TrialPhase = trial_phase
-        self.dataloader_factory = dataloader_factory
+        self.dataloader_factory: DataloaderFactory = dataloader_factory
+        self.is_stop: bool = False
+        self.trial_current_iteration: Dict[int, int] = {}
+        self.log("info", "初始化完成")
 
     def send_signal(self, trial_id: int) -> None:
         if trial_id not in self.active_trials.keys():
@@ -136,7 +149,7 @@ class Worker:
         self.log("info", f"接收到訊號 trial: {trial_id}")
         self.interrupt_set.add(trial_id)
 
-    def assign_trial(self, trial_state: TrialState) -> Optional[TrialState]:
+    def assign_trial(self, trial_state: TrialState) -> None:
         """
         將試驗分配給該 worker 並開始訓練。
 
@@ -147,15 +160,40 @@ class Worker:
             TrialState: 更新後的試驗狀態。
         """
         if len(self.active_trials) >= self.worker_state.max_trials:
-            return trial_state
+            return
 
         self.active_trials[trial_state.id] = trial_state
+        self.trial_current_iteration[trial_state.id] = 0
         trial_state.status = TrialStatus.RUNNING
         trial_state.worker_id = self.worker_state.id
         trial_state.worker_type = self.worker_state.worker_type
-        ray.get(self.tuner.record_trial_progress.remote(trial_state))  # type: ignore
-        self.log("info", f"執行中Trial: {[i for i in self.active_trials]}")
-        return self.train(trial_state)
+        ray.wait(
+            [self.tuner.record_trial_progress.remote(trial_state.without_checkpoint())],
+            timeout=0.1,
+        )  # type: ignore
+        self.log("info", f"Running Trials: {[i for i in self.active_trials]}")
+
+    def run(self) -> None:
+        self.log("info", "開始執行 Training Loop")
+        while not self.is_stop:
+            update_result_futures: List[ObjectRef] = []
+            active_trials = list(self.active_trials.values())
+            for trial_state in active_trials:
+                self.train(trial_state)
+
+                if trial_state.status != TrialStatus.RUNNING:
+                    update_result_futures.append(
+                        self.tuner.submit_trial.remote(trial_state)
+                    )  # type: ignore
+                    self.active_trials.pop(trial_state.id)
+                    continue
+
+                update_result_futures.append(
+                    self.tuner.update_trial_result.remote(
+                        trial_state.without_checkpoint()
+                    )
+                )  # type: ignore
+            ray.wait(update_result_futures, timeout=0.1)  # type: ignore
 
     def get_active_trials_nums(self) -> int:
         """
@@ -197,29 +235,38 @@ class Worker:
             train_loader, test_loader, _ = self.dataloader_factory(hyper.batch_size)
 
             model = get_model(hyper.model_type)
-            model.load_state_dict(checkpoint.model_state_dict)
+            if checkpoint:
+                model.load_state_dict(checkpoint.model_state_dict)
             model.to(self.device)
 
-            optimizer = optim.SGD(model.parameters(), lr=hyper.lr, momentum=hyper.momentum)  # type: ignore
-            optimizer.load_state_dict(checkpoint.optimizer_state_dict)
+            optimizer = optim.SGD(
+                model.parameters(), lr=hyper.lr, momentum=hyper.momentum
+            )  # type: ignore
+            if checkpoint:
+                optimizer.load_state_dict(checkpoint.optimizer_state_dict)
 
             for param_group in optimizer.param_groups:
                 param_group["lr"] = hyper.lr
                 param_group["momentum"] = hyper.momentum
+
         except Exception as e:
             self.log("error", f"{type(e).__name__}: {e}", trial_state.id)
-            self.active_trials.pop(trial_state.id)
             trial_state.status = TrialStatus.FAILED
             return trial_state
 
-        current_iteration = 0
         while True:
-            if trial_state.accuracy > trial_state.stop_accuracy:
-                break
+            # 是否達到結束條件
+            if (
+                trial_state.accuracy > trial_state.stop_accuracy
+                or trial_state.iteration >= trial_state.stop_iteration
+            ):
+                self.log("info", "訓練結束", trial_id=trial_state.id)
+                self.finish_trial(trial_state)
+                trial_state.accuracy = self.test(model, test_loader)
+                trial_state.update_checkpoint(model, optimizer)
+                return trial_state
 
-            if trial_state.iteration >= trial_state.stop_iteration:
-                break
-
+            # 當前階段是否超前
             if self.trial_phase.is_trial_exceeding(trial_state):
                 self.log(
                     "info", f"已超過當前階段 Phase{self.trial_phase.current_phase}"
@@ -228,6 +275,7 @@ class Worker:
                 trial_state.update_checkpoint(model, optimizer)
                 return trial_state
 
+            # 當前階段是否落後
             if (
                 self.worker_state.worker_type == WorkerType.CPU
                 and trial_state.phase < self.trial_phase.current_phase
@@ -237,15 +285,17 @@ class Worker:
                 trial_state.update_checkpoint(model, optimizer)
                 return trial_state
 
+            # GPU 是否達到次數上限
             if (
                 self.worker_state.worker_type == WorkerType.GPU
-                and current_iteration >= GPU_MAX_ITERATION
+                and self.trial_current_iteration[trial_state.id] >= GPU_MAX_ITERATION
             ):
                 self.log("info", "已達到 GPU_MAX_ITERATION 次數")
                 self.pause_trial(trial_state)
                 trial_state.update_checkpoint(model, optimizer)
                 return trial_state
 
+            # 是否被中斷
             if trial_state.id in self.interrupt_set:
                 self.log("info", "收到回傳訊號")
                 self.pause_trial(trial_state)
@@ -258,52 +308,53 @@ class Worker:
             )
 
             trial_state.iteration += 1
+            self.trial_current_iteration[trial_state.id] += 1
             trial_state.phase = self.trial_phase.get_trial_phase(trial_state)
             trial_state.device_iteration_count[self.worker_state.worker_type] += 1
-            current_iteration += 1
 
-            if trial_state.accuracy > trial_state.stop_accuracy:
+            if trial_state.iteration % self.mutation_iteration == 0:
                 break
 
-            if trial_state.iteration >= trial_state.stop_iteration:
-                break
+        trial_state.accuracy = self.test(model, test_loader)
 
-            if (
-                trial_state.iteration != 0
-                and trial_state.iteration % self.mutation_iteration == 0
-            ):
-                trial_state.accuracy = self.test(model, test_loader)
-                ray.get(self.tuner.update_trial_result.remote(trial_state))  # type: ignore
+        self.log(
+            "info",
+            f"Phase: {trial_state.phase}, Iteration: {trial_state.iteration} Accuracy: {trial_state.accuracy}",
+            trial_id=trial_state.id,
+        )
 
-                self.log(
-                    "info",
-                    f"Phase: {trial_state.phase}, Iteration: {trial_state.iteration} Accuracy: {trial_state.accuracy}",
-                    trial_id=trial_state.id,
-                )
+        if (
+            trial_state.accuracy > trial_state.stop_accuracy
+            or trial_state.iteration >= trial_state.stop_iteration
+        ):
+            self.log("info", "訓練結束", trial_id=trial_state.id)
+            self.finish_trial(trial_state)
+            trial_state.update_checkpoint(model, optimizer)
+            return trial_state
 
-                base_line = ray.get(
-                    self.tuner.get_baseline.remote(iteration=trial_state.iteration)  # type: ignore
-                )
+        if trial_state.status == TrialStatus.TERMINATE:
+            return trial_state
 
-                if trial_state.accuracy < base_line:
-                    self.log(
-                        "info",
-                        f"Accuracy:{trial_state.accuracy:.4f} < Base Line:{base_line:.4f}",
-                        trial_id=trial_state.id,
-                    )
-
-                    if random.choice((False, False, True)):
-                        self.log(
-                            "info",
-                            f"↩️ 需要執行突變，已回傳",
-                            trial_id=trial_state.id,
-                        )
-
-                        self.need_mutation_trial(trial_state)
-                        return trial_state
-
-        self.log("info", f"訓練結束", trial_id=trial_state.id)
-        self.finish_trial(trial_state)
+        # base_line = ray.get(
+        #     self.tuner.get_baseline.remote(iteration=trial_state.iteration)
+        # )  # type: ignore
+        ray.get(
+            self.tuner.record_trial_progress.remote(trial_state.without_checkpoint())
+        )
+        lower_quantile, _ = ray.get(self.tuner.get_quantile_trial.remote())
+        if trial_state in lower_quantile:
+            # self.log(
+            #     "info",
+            #     f"Accuracy:{trial_state.accuracy:.4f} < Base Line:{base_line:.4f}",
+            #     trial_id=trial_state.id,
+            # )
+            # if random.randint(1, 100) < 33:
+            #     self.log(
+            #         "info",
+            #         "↩️ 需要執行突變，已回傳",
+            #         trial_id=trial_state.id,
+            #     )
+            self.need_mutation_trial(trial_state)
         trial_state.update_checkpoint(model, optimizer)
         return trial_state
 
@@ -338,7 +389,6 @@ class Worker:
         Args:
             trial_state (TrialState): 試驗狀態。
         """
-        self.active_trials.pop(trial_state.id)
         trial_state.status = TrialStatus.TERMINATE
 
     def pause_trial(self, trial_state: TrialState) -> None:
@@ -348,11 +398,9 @@ class Worker:
         Args:
             trial_state (TrialState): 試驗狀態。
         """
-        self.active_trials.pop(trial_state.id)
         trial_state.status = TrialStatus.PAUSE
 
     def need_mutation_trial(self, trial_state: TrialState):
-        self.active_trials.pop(trial_state.id)
         trial_state.status = TrialStatus.NEED_MUTATION
 
     def get_log_file(self) -> Dict[str, Union[int, str]]:
@@ -414,6 +462,9 @@ class Worker:
         """
         return self.worker_state.worker_type
 
+    def stop(self):
+        self.is_stop = True
+
     def update_phase(self, phase) -> None:
         self.log("info", f"更新階段到Phase {self.trial_phase.current_phase}")
         self.trial_phase.current_phase = phase
@@ -422,7 +473,7 @@ class Worker:
 def generate_all_workers(
     tuner: ActorHandle,
     train_step: TrainStepFunction,
-    dataloader_factory: DataLoaderFactory,
+    dataloader_factory: DataloaderFactory,
 ) -> List[ActorHandle]:
     """
     根據 Ray 叢集的節點資源建立所有 Worker。
@@ -476,7 +527,7 @@ def generate_all_workers(
                             # num_gpus=resource.get("GPU", 0),
                             num_gpus=1,
                             node_name=f"node:{node_address}",
-                            max_trials=3,
+                            max_trials=7,
                             worker_type=WorkerType.GPU,
                         )
                     )
@@ -489,7 +540,7 @@ def generate_all_workers(
     for index, worker_state in enumerate(worker_states):
         workers.append(
             Worker.options(  # type: ignore
-                max_concurrency=worker_state.max_trials + 1,
+                max_concurrency=worker_state.max_trials + 3,
                 name=f"worker-{index}",
                 num_cpus=worker_state.num_cpus,
                 num_gpus=worker_state.num_gpus,

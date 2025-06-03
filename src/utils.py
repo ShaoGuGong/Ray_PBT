@@ -21,7 +21,7 @@ class TrainStepFunction(Protocol):
     def __call__(self, *args: Any, **kwargs: Any) -> None: ...
 
 
-class DataLoaderFactory(Protocol):
+class DataloaderFactory(Protocol):
     def __call__(
         self,
         batch_size: int,
@@ -95,7 +95,8 @@ class Hyperparameter:
         return cls(
             lr=random.uniform(0.001, 1),
             momentum=random.uniform(0.001, 1),
-            batch_size=random.choice([64, 128, 256, 512, 1024]),
+            # batch_size=random.choice([64, 128, 256, 512, 1024]),
+            batch_size=512,
             model_type=ModelType.RESNET_18,
         )
 
