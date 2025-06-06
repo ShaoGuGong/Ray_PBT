@@ -1,16 +1,14 @@
 import os
 from datetime import datetime
 from itertools import islice
-from random import shuffle
 from typing import List, Tuple
 
-import numpy as np
 import ray
 import torch
 import torch.nn as nn
 import torchvision
 import torchvision.transforms as transforms
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 
 from src.config import DATASET_PATH, STOP_ITERATION
 from src.trial_state import TrialState
@@ -123,7 +121,7 @@ if __name__ == "__main__":
             "excludes": [".git", "test", "logs/*", "LICENSE", "README.md"],
         }
     )
-    trial_states = generate_trial_states(40)
+    trial_states = generate_trial_states(50)
     tuner = Tuner.options(  # type: ignore
         max_concurrency=16,
         num_cpus=1,
@@ -140,3 +138,5 @@ if __name__ == "__main__":
         f.write(zip_logs_bytes)
 
     unzip_file(zip_output_path, zip_output_dir)
+
+    ray.shutdown()

@@ -11,7 +11,14 @@ from .config import (
     TRIAL_PROGRESS_OUTPUT_PATH,
     TRIAL_RESULT_OUTPUT_PATH,
 )
-from .utils import Checkpoint, Hyperparameter, TrialStatus, WorkerType, get_model
+from .utils import (
+    Checkpoint,
+    Hyperparameter,
+    ModelFactory,
+    TrialStatus,
+    WorkerType,
+    get_model,
+)
 
 
 class TrialState:
@@ -19,6 +26,7 @@ class TrialState:
         self,
         id: int,
         hyperparameter: Hyperparameter,
+        model_factory: Optional[ModelFactory] = None,
         stop_iteration: int = STOP_ITERATION,
         without_checkpoint: bool = False,
     ) -> None:

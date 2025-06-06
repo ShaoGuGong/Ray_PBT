@@ -28,6 +28,10 @@ class DataloaderFactory(Protocol):
     ) -> Tuple[DataLoader, DataLoader, DataLoader]: ...
 
 
+class ModelFactory(Protocol):
+    def __call__(self) -> nn.Model: ...
+
+
 # ╭──────────────────────────────────────────────────────────╮
 # │                          Enums                           │
 # ╰──────────────────────────────────────────────────────────╯
@@ -46,6 +50,7 @@ class TrialStatus(Enum):
     PENDING = auto()
     TERMINATE = auto()
     PAUSE = auto()
+    INTERRUPTED = auto()
     NEED_MUTATION = auto()
     FAILED = auto()
 
@@ -129,7 +134,7 @@ def pipe(*functions: Composeable) -> Composeable:
     return lambda data: reduce(apply, functions, data)
 
 
-def get_model(model_type: ModelType):
+def get_model(model_type: ModelType) -> nn.Model:
     if model_type == ModelType.RESNET_18:
         model = models.resnet18()
         model.fc = nn.Linear(model.fc.in_features, 10)
@@ -163,7 +168,9 @@ def colored_progress_bar(data: List[int], bar_width: int) -> str:
         max_idx = percentages.index(max(percentages))
         lengths[max_idx] += 1
 
-    bar = "".join(colors[i % len(colors)] + "━" * l for i, l in enumerate(lengths))
+    bar = "".join(
+        colors[i % len(colors)] + "━" * length for i, length in enumerate(lengths)
+    )
     bar += RESET
 
     data_str = "/".join([f"{x:04d}" for x in data])

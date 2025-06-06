@@ -289,6 +289,13 @@ class TrialScheduler:
     def submit_trial(self, trial_state: TrialState) -> None:
         status = trial_state.status
 
+        if status == TrialStatus.INTERRUPTED:
+            trial_state.status = TrialStatus.PENDING
+            self.pending_trial_states.append(trial_state)
+            self.logger.info(
+                f"🔃 Worker {trial_state.worker_id} 回傳已中斷 Trial {trial_state.id}"
+            )
+
         if status == TrialStatus.PAUSE:
             trial_state.status = TrialStatus.PENDING
             self.pending_trial_states.append(trial_state)

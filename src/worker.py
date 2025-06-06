@@ -181,7 +181,26 @@ class Worker:
             for trial_state in active_trials:
                 self.train(trial_state)
 
-                if trial_state.status != TrialStatus.RUNNING:
+                status = trial_state.status
+                if status == TrialStatus.TERMINATE:
+                    update_result_futures.append(
+                        self.tuner.submit_trial.remote(trial_state)
+                    )  # type: ignore
+                    self.active_trials.pop(trial_state.id)
+
+                elif status == TrialStatus.PAUSE:
+                    update_result_futures.append(
+                        self.tuner.submit_trial.remote(trial_state)
+                    )  # type: ignore
+                    self.active_trials.pop(trial_state.id)
+
+                elif status == TrialStatus.NEED_MUTATION:
+                    update_result_futures.append(
+                        self.tuner.submit_trial.remote(trial_state)
+                    )  # type: ignore
+                    self.active_trials.pop(trial_state.id)
+
+                elif status == TrialStatus.INTERRUPTED:
                     update_result_futures.append(
                         self.tuner.submit_trial.remote(trial_state)
                     )  # type: ignore
@@ -281,7 +300,7 @@ class Worker:
                 and trial_state.phase < self.trial_phase.current_phase
             ):
                 self.log("info", "已落後當前訓練階段")
-                self.pause_trial(trial_state)
+                self.interrupt_trial(trial_state)
                 trial_state.update_checkpoint(model, optimizer)
                 return trial_state
 
@@ -298,7 +317,7 @@ class Worker:
             # 是否被中斷
             if trial_state.id in self.interrupt_set:
                 self.log("info", "收到回傳訊號")
-                self.pause_trial(trial_state)
+                self.interrupt_trial(trial_state)
                 self.interrupt_set.remove(trial_state.id)
                 trial_state.update_checkpoint(model, optimizer)
                 return trial_state
@@ -399,6 +418,9 @@ class Worker:
             trial_state (TrialState): 試驗狀態。
         """
         trial_state.status = TrialStatus.PAUSE
+
+    def interrupt_trial(self, trial_state: TrialState) -> None:
+        trial_state.status = TrialStatus.INTERRUPTED
 
     def need_mutation_trial(self, trial_state: TrialState):
         trial_state.status = TrialStatus.NEED_MUTATION
@@ -519,19 +541,30 @@ def generate_all_workers(
                 index += 1
 
             if "GPU" in resource:
-                for _ in range(int(resource["GPU"])):
-                    worker_states.append(
-                        WorkerState(
-                            id=index,
-                            num_cpus=0,
-                            # num_gpus=resource.get("GPU", 0),
-                            num_gpus=1,
-                            node_name=f"node:{node_address}",
-                            max_trials=7,
-                            worker_type=WorkerType.GPU,
-                        )
+                # for _ in range(int(resource["GPU"])):
+                #     worker_states.append(
+                #         WorkerState(
+                #             id=index,
+                #             num_cpus=0,
+                #             # num_gpus=resource.get("GPU", 0),
+                #             num_gpus=1,
+                #             node_name=f"node:{node_address}",
+                #             max_trials=7,
+                #             worker_type=WorkerType.GPU,
+                #         )
+                #     )
+                #     index += 1
+                worker_states.append(
+                    WorkerState(
+                        id=index,
+                        num_cpus=0,
+                        num_gpus=resource["GPU"],
+                        node_name=f"node:{node_address}",
+                        max_trials=12,
+                        worker_type=WorkerType.GPU,
                     )
-                    index += 1
+                )
+                index += 1
             visited_address.add(node_address)
 
     workers: list[ActorHandle] = []
