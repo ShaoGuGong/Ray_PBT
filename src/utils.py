@@ -6,31 +6,8 @@ from functools import reduce
 from typing import Any, Callable, Dict, List, Protocol, Tuple, TypeVar
 
 import ray
-import torch.nn as nn
-import torchvision.models as models
+from torch import nn, optim
 from torch.utils.data import DataLoader
-
-# ╭──────────────────────────────────────────────────────────╮
-# │                       Type Define                        │
-# ╰──────────────────────────────────────────────────────────╯
-
-Accuracy = float
-
-
-class TrainStepFunction(Protocol):
-    def __call__(self, *args: Any, **kwargs: Any) -> None: ...
-
-
-class DataloaderFactory(Protocol):
-    def __call__(
-        self,
-        batch_size: int,
-    ) -> Tuple[DataLoader, DataLoader, DataLoader]: ...
-
-
-class ModelFactory(Protocol):
-    def __call__(self) -> nn.Model: ...
-
 
 # ╭──────────────────────────────────────────────────────────╮
 # │                          Enums                           │
@@ -41,7 +18,7 @@ class ModelType(Enum):
     RESNET_18 = auto()
     RESNET_50 = auto()
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.name
 
 
@@ -54,7 +31,7 @@ class TrialStatus(Enum):
     NEED_MUTATION = auto()
     FAILED = auto()
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.name
 
 
@@ -93,7 +70,10 @@ class Hyperparameter:
     model_type: ModelType
 
     def __str__(self) -> str:
-        return f"Hyperparameter(lr:{self.lr:.3f}, momentum:{self.momentum:.3f}, batch_size:{self.batch_size:4d}, model_type:{self.model_type})"
+        return (
+            f"Hyperparameter(lr:{self.lr:.3f}, momentum:{self.momentum:.3f} "
+            f"batch_size:{self.batch_size:4d}, model_type:{self.model_type})"
+        )
 
     @classmethod
     def random(cls) -> "Hyperparameter":
@@ -110,6 +90,31 @@ class Hyperparameter:
 class Checkpoint:
     model_state_dict: Dict
     optimizer_state_dict: Dict
+
+
+# ╭──────────────────────────────────────────────────────────╮
+# │                       Type Define                        │
+# ╰──────────────────────────────────────────────────────────╯
+
+Accuracy = float
+
+
+class TrainStepFunction(Protocol):
+    def __call__(self, *args: Any, **kwargs: Any) -> None: ...
+
+
+class DataloaderFactory(Protocol):
+    def __call__(
+        self,
+        batch_size: int,
+    ) -> Tuple[DataLoader, DataLoader, DataLoader]: ...
+
+
+class ModelInitFunction(Protocol):
+    def __call__(
+        self,
+        hyperparameter: Hyperparameter,
+    ) -> Tuple[nn.Module, optim.Optimizer]: ...
 
 
 # ╭──────────────────────────────────────────────────────────╮
@@ -134,29 +139,17 @@ def pipe(*functions: Composeable) -> Composeable:
     return lambda data: reduce(apply, functions, data)
 
 
-def get_model(model_type: ModelType) -> nn.Model:
-    if model_type == ModelType.RESNET_18:
-        model = models.resnet18()
-        model.fc = nn.Linear(model.fc.in_features, 10)
-        return model
-
-    elif model_type == ModelType.RESNET_50:
-        model = models.resnet50()
-        model.fc = nn.Linear(model.fc.in_features, 100)
-        return model
-
-
 def get_head_node_address() -> str:
     return ray.get_runtime_context().gcs_address.split(":")[0]
 
 
 def colored_progress_bar(data: List[int], bar_width: int) -> str:
-    GREEN = "\033[92m"
-    RED = "\033[91m"
-    YELLOW = "\033[93m"
-    RESET = "\033[0m"
+    green = "\033[92m"
+    red = "\033[91m"
+    yellow = "\033[93m"
+    reset = "\033[0m"
 
-    colors = [GREEN, RED, YELLOW]
+    colors = [green, red, yellow]
     total = sum(data)
     if total == 0:
         return " " * bar_width + " (no data)"
@@ -171,7 +164,7 @@ def colored_progress_bar(data: List[int], bar_width: int) -> str:
     bar = "".join(
         colors[i % len(colors)] + "━" * length for i, length in enumerate(lengths)
     )
-    bar += RESET
+    bar += reset
 
     data_str = "/".join([f"{x:04d}" for x in data])
     perc_str = "/".join([f"{p * 100:.2f}%" for p in percentages])

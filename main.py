@@ -1,14 +1,15 @@
-import os
 from datetime import datetime
 from itertools import islice
+from pathlib import Path
 from typing import List, Tuple
 
 import ray
 import torch
-import torch.nn as nn
 import torchvision
-import torchvision.transforms as transforms
+from torch import nn, optim
+from torch._prims_common import DeviceLikeType
 from torch.utils.data import DataLoader
+from torchvision import models, transforms
 
 from src.config import DATASET_PATH, STOP_ITERATION
 from src.trial_state import TrialState
@@ -19,14 +20,17 @@ from src.utils import Hyperparameter, get_head_node_address, unzip_file
 def cifar10_data_loader_factory(
     batch_size: int = 64,
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
-    data_dir = os.path.expanduser(DATASET_PATH)
-    if not os.path.exists(data_dir):
-        os.makedirs(data_dir)
+    data_dir = Path(DATASET_PATH).expanduser()
+    if not Path(data_dir).exists():
+        Path(data_dir).mkdir(parents=True, exist_ok=True)
 
-    if not os.path.exists(os.path.join(data_dir, "cifar-10-batches-py")):
-        print(f"{os.path.join(data_dir, 'cifar-10-batches-py')} 不存在")
+    if not (Path(data_dir) / "cifar-10-batches-py").exists():
+        print(f"{Path(data_dir) / 'cifar-10-batches-py'} 不存在")
         torchvision.datasets.CIFAR10(
-            root=data_dir, train=True, download=True, transform=None
+            root=data_dir,
+            train=True,
+            download=True,
+            transform=None,
         )
 
     train_transform = transforms.Compose(
@@ -35,21 +39,27 @@ def cifar10_data_loader_factory(
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-        ]
+        ],
     )
 
     test_transform = transforms.Compose(
         [
             transforms.ToTensor(),
             transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-        ]
+        ],
     )
 
     train_dataset = torchvision.datasets.CIFAR10(
-        root=data_dir, train=True, download=False, transform=train_transform
+        root=data_dir,
+        train=True,
+        download=False,
+        transform=train_transform,
     )
     test_dataset = torchvision.datasets.CIFAR10(
-        root=data_dir, train=False, download=False, transform=test_transform
+        root=data_dir,
+        train=False,
+        download=False,
+        transform=test_transform,
     )
 
     # np.random.seed(42)
@@ -90,23 +100,54 @@ def cifar10_data_loader_factory(
     return train_loader, valid_loader, None
 
 
+def resnet18_init_fn(
+    hyperparameter: Hyperparameter,
+) -> Tuple[nn.Module, optim.Optimizer]:
+    model = models.resnet18()
+    model.fc = nn.Linear(model.fc.in_features, 10)
+    optimizer = optim.SGD(
+        model.parameters(),
+        lr=hyperparameter.lr,
+        momentum=hyperparameter.momentum,
+    )
+    return model, optimizer
+
+
 def generate_trial_states(n: int = 1) -> List[TrialState]:
     return [
         TrialState(
             i,
             Hyperparameter.random(),
+            model_init_fn=resnet18_init_fn,
             stop_iteration=STOP_ITERATION,
         )
         for i in range(n)
     ]
 
 
-def train_step(model, optimizer, train_loader, batch_size, device=torch.device("cpu")):
+def get_resnet18(hyperparameter: Hyperparameter) -> Tuple[nn.Module, optim.Optimizer]:
+    model = models.resnet18()
+    model.fc = nn.Linear(model.fc.in_features, 10)
+    optimizer = optim.SGD(
+        model.parameters(),
+        lr=hyperparameter.lr,
+        momentum=hyperparameter.momentum,
+    )
+    return model, optimizer
+
+
+def train_step(
+    model: nn.Module,
+    optimizer: optim.Optimizer,
+    train_loader: DataLoader,
+    batch_size: int,
+    device: DeviceLikeType = torch.device("cpu"),
+) -> None:
     model.train()
     criterion = nn.CrossEntropyLoss().to(device)
 
-    for inputs, targets in islice(train_loader, 1):
-        inputs, targets = inputs.to(device), targets.to(device)
+    for raw_inputs, raw_targets in islice(train_loader, 1):
+        inputs, targets = raw_inputs.to(device), raw_targets.to(device)
         optimizer.zero_grad()
         outputs = model(inputs)
         loss = criterion(outputs, targets)
@@ -119,9 +160,9 @@ if __name__ == "__main__":
         runtime_env={
             "working_dir": ".",
             "excludes": [".git", "test", "logs/*", "LICENSE", "README.md"],
-        }
+        },
     )
-    trial_states = generate_trial_states(50)
+    trial_states = generate_trial_states(3)
     tuner = Tuner.options(  # type: ignore
         max_concurrency=16,
         num_cpus=1,
@@ -132,9 +173,9 @@ if __name__ == "__main__":
     zip_logs_bytes: bytes = ray.get(tuner.get_zipped_log.remote())
 
     zip_output_dir = f"./logs/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}/"
-    os.makedirs(zip_output_dir, exist_ok=True)
-    zip_output_path = os.path.join(zip_output_dir, "logs.zip")
-    with open(zip_output_path, "wb") as f:
+    Path(zip_output_dir).mkdir(parents=True, exist_ok=True)
+    zip_output_path = Path(zip_output_dir) / "logs.zip"
+    with Path(zip_output_path).open("wb") as f:
         f.write(zip_logs_bytes)
 
     unzip_file(zip_output_path, zip_output_dir)
