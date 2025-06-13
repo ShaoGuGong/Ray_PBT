@@ -55,7 +55,7 @@ class Tuner:
         self.trial_states = trial_states
         self.logger = get_tuner_logger()
 
-        self.logger.info(f"總共{len(trial_states)} 個 Trial")
+        self.logger.info("總共 %d 個 Trial", len(trial_states))
         self.logger.info("\n".join([str(t.hyperparameter) for t in trial_states]))
 
         self.workers = generate_all_workers(
@@ -72,7 +72,7 @@ class Tuner:
         self.trial_result: TrialResult = TrialResult()
 
         for trial in self.trial_states:
-            self.trial_result.record_trial_progress(trial.without_checkpoint())
+            self.trial_result.record_trial_progress(trial)
 
     def run(self) -> None:
         self.logger.info("開始訓練")
@@ -107,33 +107,13 @@ class Tuner:
 
         lower_quantile, upper_quantile = self.get_quantile_trial()
 
-        hyperparameter = random.choice(upper_quantile).hyperparameter
+        chose_trial = random.choice(upper_quantile)
+        hyperparameter = chose_trial.hyperparameter
         hyperparameter.lr *= 0.8
         hyperparameter.momentum *= 1.2
 
-        # _, hyperparameter, _ = self.trial_result.get_history_best_result()
-        # hyperparameters = [
-        #     result[1]
-        #     for result in self.trial_result.get_top_k_result(trial_state.iteration, 10)
-        # ]
-
-        # hyperparameter = Hyperparameter.random()
-        # hyperparameter.lr = (
-        #     trial_state.hyperparameter.lr
-        #     * 0.5
-        #     * (0.0001 + 0.1)
-        #     * (
-        #         1
-        #         + math.cos(math.pi * trial_state.iteration / trial_state.stop_iteration)
-        #     )
-        # )
-        # if len(hyperparameters) >= 3:
-        #     random_hyperparameters = random.sample(hyperparameters, 2)
-        #     hyperparameter.lr = random_hyperparameters[0].lr * 0.8
-        #     hyperparameter.momentum = random_hyperparameters[1].momentum * 1.2
-        # hyperparameter.batch_size = random_hyperparameters[2].batch_size
-
         trial_state.hyperparameter = hyperparameter
+        trial_state.checkpoint = chose_trial.checkpoint
 
         self.logger.info(
             "Trial-%d Iter-%d, 結束mutation, 新超參數: %s",

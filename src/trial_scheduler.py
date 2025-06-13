@@ -265,16 +265,6 @@ class TrialScheduler:
             self.logger.info("已到最後階段 開始執行搶奪")
             self.is_final_phase = True
 
-        # if self.pending_trial_states:
-        #     pending_trial_list = sorted(
-        #         self.pending_trial_states, key=lambda t: t.iteration
-        #     )
-        #     pending_trial_id_list = [i.id for i in pending_trial_list]
-        #     self.logger.info(
-        #         f"⏳ 等待中訓練任務列表長度：{len(pending_trial_list):2d}, "
-        #         f"{pending_trial_id_list}"
-        #     )
-
         if not self.is_final_phase:
             cpu_scheduling(
                 self.pending_trial_states,
@@ -335,7 +325,7 @@ class TrialScheduler:
 
         trial_state.worker_id = -1
         trial_state.worker_type = None
-        self.tuner.record_trial_progress.remote(trial_state.without_checkpoint())
+        self.tuner.record_trial_progress.remote(trial_state)
 
     def run(self) -> None:
         """

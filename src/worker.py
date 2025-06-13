@@ -196,9 +196,7 @@ class Worker:
                     continue
 
                 update_result_futures.append(
-                    self.tuner.update_trial_result.remote(
-                        trial_state.without_checkpoint(),
-                    ),
+                    self.tuner.update_trial_result.remote(trial_state),
                 )  # type: ignore[reportGeneralTypeIssues]
             ray.wait(update_result_futures, timeout=0.1)  # type: ignore[reportGeneralTypeIssues]
 

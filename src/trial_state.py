@@ -106,15 +106,15 @@ class TrialResult:
         self.bottom_k: int = bottom_k
         self.history_best: Tuple[
             float,
-            Optional[Hyperparameter],
-            Optional[Checkpoint],
+            Hyperparameter | None,
+            Checkpoint | None,
         ] = (0.0, None, None)
         self.trial_progress: Dict[int, TrialState] = {}
 
     def get_trial_progress(self) -> List[TrialState]:
         return list(self.trial_progress.values())
 
-    def record_trial_progress(self, trial_state: TrialState) -> None:
+    def recordtrial_progress(self, trial_state: TrialState) -> None:
         self.trial_progress[trial_state.id] = trial_state
 
     def update_trial_result(self, trial_state: TrialState) -> None:
@@ -160,7 +160,7 @@ class TrialResult:
             return [], []
 
         trials.sort(key=lambda x: x.accuracy)
-        quantile_size = int(math.ceil(len(trials) * ratio))
+        quantile_size = math.ceil(len(trials) * ratio)
 
         if quantile_size > len(trials) / 2:
             quantile_size: int = len(trials) // 2
