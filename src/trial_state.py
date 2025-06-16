@@ -1,7 +1,6 @@
 import math
 from collections import defaultdict
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
 from torch import nn, optim
@@ -28,23 +27,23 @@ class TrialState:
         hyperparameter: Hyperparameter,
         stop_iteration: int = STOP_ITERATION,
         *,
-        model_init_fn: Optional[ModelInitFunction] = None,
+        model_init_fn: ModelInitFunction | None = None,
         without_checkpoint: bool = False,
     ) -> None:
-        self.id = trial_id
-        self.hyperparameter = hyperparameter
-        self.stop_iteration = stop_iteration
-        self.status = TrialStatus.PENDING
-        self.worker_id = -1
-        self.worker_type: Optional[WorkerType] = None
-        self.run_time = 0
-        self.iteration = 0
-        self.phase = 0
+        self.id: int = trial_id
+        self.hyperparameter: Hyperparameter = hyperparameter
+        self.stop_iteration: int = stop_iteration
+        self.status: TrialStatus = TrialStatus.PENDING
+        self.worker_id: int = -1
+        self.worker_type: WorkerType | None = None
+        self.run_time: float = 0
+        self.iteration: int = 0
+        self.phase: int = 0
         self.device_iteration_count = {WorkerType.CPU: 0, WorkerType.GPU: 0}
-        self.checkpoint: Optional[Checkpoint] = None
-        self.model_init_fn: Optional[
-            Callable[[], Tuple[nn.Module, optim.Optimizer]]
-        ] = None
+        self.checkpoint: Checkpoint | None = None
+        self.model_init_fn: ModelInitFunction | None = None
+        self.accuracy: float = 0.0
+        self.stop_accuracy: int = STOP_ACCURACY
 
         if not without_checkpoint:
             if model_init_fn is None:
@@ -55,30 +54,20 @@ class TrialState:
                 raise ValueError(msg)
             self.model_init_fn = lambda: model_init_fn(self.hyperparameter)
             model, optimizer = self.model_init_fn()
-            self.checkpoint: Optional[Checkpoint] = Checkpoint({}, {})
+            self.checkpoint = Checkpoint({}, {})
             self.update_checkpoint(model, optimizer)
-
-        self.accuracy = 0.0
-        self.stop_accuracy = STOP_ACCURACY
 
     def update_checkpoint(self, model: nn.Module, optimizer: optim.Optimizer) -> None:
         if self.checkpoint is None:
             self.checkpoint = Checkpoint({}, {})
 
         self.checkpoint.model_state_dict = model.cpu().state_dict()
-        # 取得 state_dict
-        # model_state_dict = model.state_dict()
         optimizer_state_dict = optimizer.state_dict()
 
-        # # 如果是在 CUDA，轉到 CPU 儲存
-        # model_state_dict = {k: v.cpu() for k, v in model_state_dict.items()}
         for state in optimizer_state_dict["state"].values():
             for k, v in state.items():
                 if isinstance(v, torch.Tensor):
                     state[k] = v.cpu()
-        #
-        # # 儲存回 checkpoint
-        # self.checkpoint.model_state_dict = model_state_dict
         self.checkpoint.optimizer_state_dict = optimizer_state_dict
 
     def without_checkpoint(self) -> "TrialState":
@@ -101,17 +90,17 @@ class TrialState:
 
 class TrialResult:
     def __init__(self, top_k: int = 3, bottom_k: int = 3) -> None:
-        self.table: Dict[int, List[Tuple[float, Hyperparameter]]] = defaultdict(list)
+        self.table: dict[int, list[tuple[float, Hyperparameter]]] = defaultdict(list)
         self.top_k: int = top_k
         self.bottom_k: int = bottom_k
-        self.history_best: Tuple[
+        self.history_best: tuple[
             float,
             Hyperparameter | None,
             Checkpoint | None,
         ] = (0.0, None, None)
-        self.trial_progress: Dict[int, TrialState] = {}
+        self.trial_progress: dict[int, TrialState] = {}
 
-    def get_trial_progress(self) -> List[TrialState]:
+    def get_trial_progress(self) -> list[TrialState]:
         return list(self.trial_progress.values())
 
     def recordtrial_progress(self, trial_state: TrialState) -> None:
@@ -132,31 +121,20 @@ class TrialResult:
 
         self.display_results()
 
-    def get_mean_accuray(self, iteration: int) -> float:
-        if len(self.table[iteration]) < 5:
-            return 0.0
-        return sum([i[0] for i in self.table[iteration]]) / len(self.table[iteration])
-
-    def get_top_k_result(
-        self,
-        iteration: int,
-        k: int,
-    ) -> List[Tuple[float, Hyperparameter]]:
-        return self.table[iteration][:k]
-
     def get_history_best_result(
         self,
-    ) -> Tuple[float, Optional[Hyperparameter], Optional[Checkpoint]]:
+    ) -> tuple[float, Hyperparameter | None, Checkpoint | None]:
         return self.history_best
 
     def get_quantile(
         self,
         ratio: float = 0.25,
-    ) -> Tuple[List[TrialState], List[TrialState]]:
+    ) -> tuple[list[TrialState], list[TrialState]]:
         trials = [
             trial for trial in self.trial_progress.values() if trial.accuracy != 0
         ]
-        if len(trials) < 2:
+        min_trials = 2
+        if len(trials) < min_trials:
             return [], []
 
         trials.sort(key=lambda x: x.accuracy)

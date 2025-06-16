@@ -4,7 +4,6 @@ import random
 import zipfile
 from datetime import datetime
 from pathlib import Path
-from typing import List, Tuple
 
 import ray
 
@@ -48,7 +47,7 @@ def get_tuner_logger() -> logging.Logger:
 class Tuner:
     def __init__(
         self,
-        trial_states: List[TrialState],
+        trial_states: list[TrialState],
         train_step: TrainStepFunction,
         dataloader_factory: DataloaderFactory,
     ) -> None:
@@ -91,7 +90,7 @@ class Tuner:
     def get_quantile_trial(
         self,
         ratio: float = 0.25,
-    ) -> Tuple[List[TrialState], List[TrialState]]:
+    ) -> tuple[list[TrialState], list[TrialState]]:
         return self.trial_result.get_quantile(ratio)
 
     def record_trial_progress(self, trial_state: TrialState) -> None:
@@ -127,7 +126,7 @@ class Tuner:
     def get_baseline(self, iteration: int) -> float:
         return self.trial_result.get_mean_accuray(iteration)
 
-    def get_min_iteration_trial(self) -> Tuple[int, int]:
+    def get_min_iteration_trial(self) -> tuple[int, int]:
         cpu_trial = [
             trial
             for trial in self.trial_result.trial_progress.values()
@@ -136,7 +135,7 @@ class Tuner:
         target = min(cpu_trial, key=lambda x: x.iteration)
         return target.worker_id, target.id
 
-    def get_trial_progress(self) -> List[TrialState]:
+    def get_trial_progress(self) -> list[TrialState]:
         return self.trial_result.get_trial_progress()
 
     def submit_trial(self, trial_state: TrialState) -> None:

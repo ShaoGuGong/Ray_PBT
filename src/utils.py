@@ -3,7 +3,7 @@ import zipfile
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import reduce
-from typing import Any, Callable, Dict, List, Protocol, Tuple, TypeVar
+from typing import Any, Callable, Protocol, TypeVar
 
 import ray
 from torch import nn, optim
@@ -80,7 +80,6 @@ class Hyperparameter:
         return cls(
             lr=random.uniform(0.001, 1),
             momentum=random.uniform(0.001, 1),
-            # batch_size=random.choice([64, 128, 256, 512, 1024]),
             batch_size=512,
             model_type=ModelType.RESNET_18,
         )
@@ -88,8 +87,8 @@ class Hyperparameter:
 
 @dataclass
 class Checkpoint:
-    model_state_dict: Dict
-    optimizer_state_dict: Dict
+    model_state_dict: dict
+    optimizer_state_dict: dict
 
 
 # ╭──────────────────────────────────────────────────────────╮
@@ -107,14 +106,14 @@ class DataloaderFactory(Protocol):
     def __call__(
         self,
         batch_size: int,
-    ) -> Tuple[DataLoader, DataLoader, DataLoader]: ...
+    ) -> tuple[DataLoader, DataLoader, DataLoader]: ...
 
 
 class ModelInitFunction(Protocol):
     def __call__(
         self,
         hyperparameter: Hyperparameter,
-    ) -> Tuple[nn.Module, optim.Optimizer]: ...
+    ) -> tuple[nn.Module, optim.Optimizer]: ...
 
 
 # ╭──────────────────────────────────────────────────────────╮
@@ -143,7 +142,7 @@ def get_head_node_address() -> str:
     return ray.get_runtime_context().gcs_address.split(":")[0]
 
 
-def colored_progress_bar(data: List[int], bar_width: int) -> str:
+def colored_progress_bar(data: list[int], bar_width: int) -> str:
     green = "\033[92m"
     red = "\033[91m"
     yellow = "\033[93m"

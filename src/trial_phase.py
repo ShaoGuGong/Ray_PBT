@@ -1,5 +1,3 @@
-from typing import List
-
 from .trial_state import TrialState
 
 
@@ -25,7 +23,7 @@ class TrialPhase:
             for i in range(self.first_phase, self.last_phase + 1)
         ]
 
-    def update_phase(self, trial_states: List[TrialState]) -> None:
+    def update_phase(self, trial_states: list[TrialState]) -> None:
         if self.current_phase == self.last_phase:
             return
 

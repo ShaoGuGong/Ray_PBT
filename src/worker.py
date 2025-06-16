@@ -1,6 +1,5 @@
 import logging
 from pathlib import Path
-from typing import Dict, List, Union
 
 import ray
 import torch
@@ -30,7 +29,7 @@ from .utils import (
 
 class WorkerLoggerFormatter(logging.Formatter):
     """
-    自訂的日誌格式器，用於在日誌中加入 worker_id 和 trial_id。
+    自訂的日誌格式器, 用於在日誌中加入 worker_id 和 trial_id。
 
     Attributes:
         None
@@ -38,7 +37,7 @@ class WorkerLoggerFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         """
-        格式化日誌紀錄，加入 worker_id 和 trial_id。
+        格式化日誌紀錄, 加入 worker_id 和 trial_id。
 
         Args:
             record (logging.LogRecord): 日誌紀錄。
@@ -60,7 +59,7 @@ class WorkerLoggerFormatter(logging.Formatter):
 
 def get_worker_logger(worker_id: int) -> logging.Logger:
     """
-    建立並回傳指定 worker_id 的 logger，支援終端輸出與檔案寫入。
+    建立並回傳指定 worker_id 的 logger, 支援終端輸出與檔案寫入。
 
     Args:
         worker_id (int): Worker 的唯一識別碼。
@@ -98,13 +97,13 @@ def get_worker_logger(worker_id: int) -> logging.Logger:
 @ray.remote
 class Worker:
     """
-    表示一個 worker 節點，負責訓練與回報試驗結果。
+    表示一個 worker 節點, 負責訓練與回報試驗結果。
 
     Attributes:
         worker_state (WorkerState): Worker 的狀態資訊。
         active_trials (dict): 活躍試驗的字典。
         train_step (TrainStepFunction): 執行訓練步驟的函式。
-        device (torch.device): 使用的設備（CPU 或 GPU）。
+        device (torch.device): 使用的設備 (CPU 或 GPU) 。
         logger (logging.Logger): 負責日誌紀錄。
     """
 
@@ -117,7 +116,7 @@ class Worker:
         dataloader_factory: DataloaderFactory,
     ) -> None:
         """
-        初始化 Worker，設定狀態與參數。
+        初始化 Worker, 設定狀態與參數。
 
         Args:
             worker_state (WorkerState): Worker 的狀態資訊。
@@ -125,7 +124,7 @@ class Worker:
             tuner (ActorHandle): 負責接收訓練結果的 Actor。
         """
         self.worker_state: WorkerState = worker_state
-        self.active_trials: Dict[int, TrialState] = {}
+        self.active_trials: dict[int, TrialState] = {}
         self.train_step: TrainStepFunction = train_step
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.logger = get_worker_logger(worker_id=worker_state.id)
@@ -135,7 +134,7 @@ class Worker:
         self.trial_phase: TrialPhase = trial_phase
         self.dataloader_factory: DataloaderFactory = dataloader_factory
         self.is_stop: bool = False
-        self.trial_current_iteration: Dict[int, int] = {}
+        self.trial_current_iteration: dict[int, int] = {}
         self.log("info", "初始化完成")
 
     def send_signal(self, trial_id: int) -> None:
@@ -172,7 +171,7 @@ class Worker:
     def run(self) -> None:
         self.log("info", "開始執行 Training Loop")
         while not self.is_stop:
-            update_result_futures: List[ObjectRef] = []
+            update_result_futures: list[ObjectRef] = []
             active_trials = list(self.active_trials.values())
             for trial_state in active_trials:
                 self.train(trial_state)
@@ -209,7 +208,7 @@ class Worker:
         """
         return len(self.active_trials)
 
-    def get_active_trials(self) -> List[TrialState]:
+    def get_active_trials(self) -> list[TrialState]:
         return list(self.active_trials.values())
 
     def get_available_slots(self) -> int:
@@ -348,26 +347,11 @@ class Worker:
         if trial_state.status == TrialStatus.TERMINATE:
             return trial_state
 
-        # base_line = ray.get(
-        #     self.tuner.get_baseline.remote(iteration=trial_state.iteration)
-        # )  # type: ignore[reportGeneralTypeIssues]
-
         ray.get(
             self.tuner.record_trial_progress.remote(trial_state.without_checkpoint()),
         )
         lower_quantile, _ = ray.get(self.tuner.get_quantile_trial.remote())
         if trial_state in lower_quantile:
-            # self.log(
-            #     "info",
-            #     f"Accuracy:{trial_state.accuracy:.4f} < Base Line:{base_line:.4f}",
-            #     trial_id=trial_state.id,
-            # )
-            # if random.randint(1, 100) < 33:
-            #     self.log(
-            #         "info",
-            #         "↩️ 需要執行突變，已回傳",
-            #         trial_id=trial_state.id,
-            #     )
             self.need_mutation_trial(trial_state)
         trial_state.update_checkpoint(model, optimizer)
         return trial_state
@@ -423,7 +407,7 @@ class Worker:
     def need_mutation_trial(self, trial_state: TrialState) -> None:
         trial_state.status = TrialStatus.NEED_MUTATION
 
-    def get_log_file(self) -> Dict[str, Union[int, str]]:
+    def get_log_file(self) -> dict[str, int | str]:
         """
         取得 worker 對應的日誌檔案內容。
 
@@ -443,12 +427,12 @@ class Worker:
         with Path(log_dir).open("r") as f:
             return {"id": self.worker_state.id, "content": f.read()}
 
-    def log(self, level: str, message: str, trial_id: Union[int, str] = "N/A") -> None:
+    def log(self, level: str, message: str, trial_id: int | str = "N/A") -> None:
         """
         根據指定的 log 級別輸出訊息。
 
         Args:
-            level (str): 記錄等級（info/debug/warning/error/critical）。
+            level (str): 記錄等級 (info/debug/warning/error/critical) 。
             message (str): 要記錄的訊息。
             trial_id (Union[int, str], optional): 試驗 ID。預設為 "N/A"。
         """
@@ -475,7 +459,7 @@ class Worker:
 
     def get_worker_type(self) -> WorkerType:
         """
-        回傳 worker 類型（CPU/GPU）。
+        回傳 worker 類型 (CPU/GPU) 。
 
         Returns:
             WorkerType: Worker 類型。
@@ -494,7 +478,7 @@ def generate_all_workers(
     tuner: ActorHandle,
     train_step: TrainStepFunction,
     dataloader_factory: DataloaderFactory,
-) -> List[ActorHandle]:
+) -> list[ActorHandle]:
     """
     根據 Ray 叢集的節點資源建立所有 Worker。
 
@@ -510,7 +494,6 @@ def generate_all_workers(
     worker_states = []
     index = 0
     head_node_address = get_head_node_address()
-    print(head_node_address)
 
     for node in ray.nodes():
         node_address = node["NodeManagerAddress"]
@@ -566,7 +549,6 @@ def generate_all_workers(
             visited_address.add(node_address)
 
     workers: list[ActorHandle] = []
-    print(*worker_states, sep="\n")
 
     for index, worker_state in enumerate(worker_states):
         workers.append(
