@@ -1,5 +1,7 @@
 src/__pycache__
+test/__pycache__
 logs/
 *.log
 config.json
 plots/
+.venv/
