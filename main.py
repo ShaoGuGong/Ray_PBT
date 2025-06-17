@@ -1,7 +1,6 @@
 from datetime import datetime
 from itertools import islice
 from pathlib import Path
-from typing import List, Tuple
 
 import ray
 import torch
@@ -19,7 +18,7 @@ from src.utils import Hyperparameter, get_head_node_address, unzip_file
 
 def cifar10_data_loader_factory(
     batch_size: int = 64,
-) -> Tuple[DataLoader, DataLoader, DataLoader]:
+) -> tuple[DataLoader, DataLoader, DataLoader]:
     data_dir = Path(DATASET_PATH).expanduser()
     if not Path(data_dir).exists():
         Path(data_dir).mkdir(parents=True, exist_ok=True)
@@ -102,7 +101,7 @@ def cifar10_data_loader_factory(
 
 def resnet18_init_fn(
     hyperparameter: Hyperparameter,
-) -> Tuple[nn.Module, optim.Optimizer]:
+) -> tuple[nn.Module, optim.Optimizer]:
     model = models.resnet18()
     model.fc = nn.Linear(model.fc.in_features, 10)
     optimizer = optim.SGD(
@@ -113,7 +112,7 @@ def resnet18_init_fn(
     return model, optimizer
 
 
-def generate_trial_states(n: int = 1) -> List[TrialState]:
+def generate_trial_states(n: int = 1) -> list[TrialState]:
     return [
         TrialState(
             i,
@@ -125,7 +124,7 @@ def generate_trial_states(n: int = 1) -> List[TrialState]:
     ]
 
 
-def get_resnet18(hyperparameter: Hyperparameter) -> Tuple[nn.Module, optim.Optimizer]:
+def get_resnet18(hyperparameter: Hyperparameter) -> tuple[nn.Module, optim.Optimizer]:
     model = models.resnet18()
     model.fc = nn.Linear(model.fc.in_features, 10)
     optimizer = optim.SGD(

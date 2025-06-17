@@ -1,5 +1,4 @@
 import math
-from collections import defaultdict
 from pathlib import Path
 
 import torch
@@ -9,7 +8,6 @@ from .config import (
     STOP_ACCURACY,
     STOP_ITERATION,
     TRIAL_PROGRESS_OUTPUT_PATH,
-    TRIAL_RESULT_OUTPUT_PATH,
 )
 from .utils import (
     Checkpoint,
@@ -44,6 +42,7 @@ class TrialState:
         self.model_init_fn: ModelInitFunction | None = None
         self.accuracy: float = 0.0
         self.stop_accuracy: int = STOP_ACCURACY
+        self.chunk_size: int = 1
 
         if not without_checkpoint:
             if model_init_fn is None:
@@ -87,12 +86,15 @@ class TrialState:
         new_trial.phase = self.phase
         return new_trial
 
+    def set_chunk_size(self, chunk_size: int) -> None:
+        if chunk_size < 1:
+            msg = "Chunk size must be at least 1"
+            raise ValueError(msg)
+        self.chunk_size = chunk_size
+
 
 class TrialResult:
-    def __init__(self, top_k: int = 3, bottom_k: int = 3) -> None:
-        self.table: dict[int, list[tuple[float, Hyperparameter]]] = defaultdict(list)
-        self.top_k: int = top_k
-        self.bottom_k: int = bottom_k
+    def __init__(self) -> None:
         self.history_best: tuple[
             float,
             Hyperparameter | None,
@@ -108,18 +110,12 @@ class TrialResult:
 
     def update_trial_result(self, trial_state: TrialState) -> None:
         self.record_trial_progress(trial_state)
-        self.table[trial_state.iteration].append(
-            (trial_state.accuracy, trial_state.hyperparameter),
-        )
-        self.table[trial_state.iteration].sort(key=lambda x: x[0], reverse=True)
         if trial_state.accuracy > self.history_best[0]:
             self.history_best = (
                 trial_state.accuracy,
                 trial_state.hyperparameter,
                 trial_state.checkpoint,
             )
-
-        self.display_results()
 
     def get_history_best_result(
         self,
@@ -144,67 +140,6 @@ class TrialResult:
             quantile_size: int = len(trials) // 2
 
         return trials[:quantile_size], trials[-quantile_size:]
-
-    def display_results(self, output_path: str = TRIAL_RESULT_OUTPUT_PATH) -> None:
-        if not self.table:
-            print("No results available")
-            return
-        try:
-            with Path(output_path).open("w") as f:
-                f.write(f"┏{'':━^13}┳{'':━^15}┳{'':━^35}┓\n")
-                f.write(
-                    f"┃{'Iteration':^13}┃{'Accuracy':^15}┃{'Hyperparameter':^35}┃\n",
-                )
-                f.write(f"┣{'':━^4}┳{'':━^8}╋{'':━^15}╋{'':━^35}┫\n")
-
-                for iteration, row in self.table.items():
-                    top = row[: self.top_k]
-
-                    bot = row[-self.bottom_k :]
-                    if len(row) <= self.top_k:
-                        bot = []
-
-                    for data in sorted(top, key=lambda x: x[0] * -1):
-                        hyper = data[1]
-                        accuracy = data[0]
-                        output = (
-                            f"lr:{hyper.lr:5.2f} momentum:{hyper.momentum:5.2f} "
-                            f"batch:{hyper.batch_size:4}"
-                        )
-
-                        f.write(f"┃{'':^4}┃{'':^8}┃{accuracy:^15.6f}┃{output:^35}┃\n")
-
-                    f.write(f"\033[s\033[{(len(top) + 1) // 2}A\033[8C")
-                    f.write(f"{'top-' + str(self.top_k):^4}\033[u")
-
-                    if self.bottom_k == 0 or len(bot) == 0:
-                        f.write(f"\033[s\033[{(len(top) + len(bot) + 2) // 2}A\033[1C")
-                        f.write(f"{iteration:^4}\033[u")
-                        f.write(f"┣{'':━^4}╋{'':━^8}╋{'':━^15}╋{'':━^35}┫\n")
-                        continue
-
-                    f.write(f"┃{'':^4}┣{'':━^8}╋{'':━^15}╋{'':━^35}┫\n")
-                    for data in sorted(bot, key=lambda x: x[0] * -1):
-                        hyper = data[1]
-                        accuracy = data[0]
-                        output = (
-                            f"lr:{hyper.lr:5.2f} momentum:{hyper.momentum:5.2f} "
-                            f"batch:{hyper.batch_size:4}"
-                        )
-
-                        f.write(f"┃{'':^4}┃{'':^8}┃{accuracy:^15.6f}┃{output:^35}┃\n")
-                    f.write(f"\033[s\033[{(len(bot) + 1) // 2}A\033[8C")
-                    f.write(f"{'bot-' + str(self.bottom_k):^4}\033[u")
-                    f.write(f"\033[s\033[{(len(top) + len(bot) + 2) // 2}A\033[1C")
-                    f.write(f"{iteration:^4}\033[u")
-                    f.write(f"┣{'':━^4}╋{'':━^8}╋{'':━^15}╋{'':━^35}┫\n")
-                f.write(f"\033[A┗{'':━^4}┻{'':━^8}┻{'':━^15}┻{'':━^35}┛\n")
-
-                f.write(
-                    f"History Best: {self.history_best[0]} {self.history_best[1]}\n",
-                )
-        except Exception as e:
-            print(f"{e}")
 
     def display_trial_progress(
         self,

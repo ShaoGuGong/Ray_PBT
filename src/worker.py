@@ -1,4 +1,5 @@
 import logging
+from itertools import count
 from pathlib import Path
 
 import ray
@@ -492,7 +493,7 @@ def generate_all_workers(
 
     visited_address = set()
     worker_states = []
-    index = 0
+    count_gen = count(start=0, step=1)
     head_node_address = get_head_node_address()
 
     for node in ray.nodes():
@@ -511,7 +512,7 @@ def generate_all_workers(
 
                 worker_states.append(
                     WorkerState(
-                        id=index,
+                        id=next(count_gen),
                         num_cpus=cpus,
                         num_gpus=0,
                         node_name=f"node:{node_address}",
@@ -519,7 +520,6 @@ def generate_all_workers(
                         worker_type=WorkerType.CPU,
                     ),
                 )
-                index += 1
 
             if "GPU" in resource:
                 # for _ in range(int(resource["GPU"])):
@@ -537,7 +537,7 @@ def generate_all_workers(
                 #     index += 1
                 worker_states.append(
                     WorkerState(
-                        id=index,
+                        id=next(count_gen),
                         num_cpus=0,
                         num_gpus=resource["GPU"],
                         node_name=f"node:{node_address}",
@@ -545,7 +545,6 @@ def generate_all_workers(
                         worker_type=WorkerType.GPU,
                     ),
                 )
-                index += 1
             visited_address.add(node_address)
 
     workers: list[ActorHandle] = []
