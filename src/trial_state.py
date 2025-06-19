@@ -1,5 +1,6 @@
 import math
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn, optim
@@ -16,6 +17,9 @@ from .utils import (
     TrialStatus,
     WorkerType,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class TrialState:
@@ -39,7 +43,6 @@ class TrialState:
         self.phase: int = 0
         self.device_iteration_count = {WorkerType.CPU: 0, WorkerType.GPU: 0}
         self.checkpoint: Checkpoint | None = None
-        self.model_init_fn: ModelInitFunction | None = None
         self.accuracy: float = 0.0
         self.stop_accuracy: int = STOP_ACCURACY
         self.chunk_size: int = 1
@@ -51,7 +54,10 @@ class TrialState:
                     "and optimizer unless `without_checkpoint=True`"
                 )
                 raise ValueError(msg)
-            self.model_init_fn = lambda: model_init_fn(self.hyperparameter)
+
+            self.model_init_fn: Callable[[], tuple[nn.Module, optim.Optimizer]] = (
+                lambda: model_init_fn(self.hyperparameter)
+            )
             model, optimizer = self.model_init_fn()
             self.checkpoint = Checkpoint({}, {})
             self.update_checkpoint(model, optimizer)
@@ -105,7 +111,7 @@ class TrialResult:
     def get_trial_progress(self) -> list[TrialState]:
         return list(self.trial_progress.values())
 
-    def recordtrial_progress(self, trial_state: TrialState) -> None:
+    def record_trial_progress(self, trial_state: TrialState) -> None:
         self.trial_progress[trial_state.id] = trial_state
 
     def update_trial_result(self, trial_state: TrialState) -> None:
@@ -143,7 +149,7 @@ class TrialResult:
 
     def display_trial_progress(
         self,
-        output_path: str = TRIAL_PROGRESS_OUTPUT_PATH,
+        output_path: Path = TRIAL_PROGRESS_OUTPUT_PATH,
     ) -> None:
         try:
             with Path(output_path).open("w") as f:

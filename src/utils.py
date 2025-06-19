@@ -1,9 +1,10 @@
 import random
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import reduce
-from typing import Any, Callable, Protocol, TypeVar
+from typing import Any, Protocol, TypeVar
 
 import ray
 from torch import nn, optim

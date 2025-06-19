@@ -123,9 +123,6 @@ class Tuner:
 
         return trial_state
 
-    def get_baseline(self, iteration: int) -> float:
-        return self.trial_result.get_mean_accuray(iteration)
-
     def get_min_iteration_trial(self) -> tuple[int, int]:
         cpu_trial = [
             trial

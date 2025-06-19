@@ -22,11 +22,16 @@ def cpu_scheduling(
     if not pending_trial_states:
         return
 
-    available_futures = [worker.get_available_slots.remote() for worker in cpu_workers]
-
+    available_futures: list = [
+        worker.get_available_slots.remote() for worker in cpu_workers
+    ]
     available_cpu_workers = [
         worker
-        for worker, available_slots in zip(cpu_workers, ray.get(available_futures))  # type: ignore[reportGeneralTypeIssues]
+        for worker, available_slots in zip(
+            cpu_workers,
+            ray.get(available_futures),
+            strict=True,
+        )  # type: ignore[reportGeneralTypeIssues]
         if available_slots
     ]
 
@@ -59,7 +64,11 @@ def gpu_scheduling(
 
     available_gpu_workers = [
         (worker, available_slots)
-        for worker, available_slots in zip(gpu_workers, ray.get(available_futures))  # type: ignore[reportGeneralTypeIssues]
+        for worker, available_slots in zip(
+            gpu_workers,
+            ray.get(available_futures),  # type: ignore[reportGeneralTypeIssues]
+            strict=True,
+        )
         if available_slots
     ]
 
@@ -87,7 +96,11 @@ def round_robin_strategy(
 
     available_cpu_workers = [
         worker
-        for worker, available_slots in zip(cpu_workers, ray.get(available_futures))  # type: ignore[reportGeneralTypeIssues]
+        for worker, available_slots in zip(
+            cpu_workers,
+            ray.get(available_futures),  # type: ignore[reportGeneralTypeIssues]
+            strict=True,
+        )
         if available_slots
     ]
 
@@ -114,7 +127,11 @@ def round_robin_strategy(
 
     available_gpu_workers = [
         (worker, available_slots)
-        for worker, available_slots in zip(gpu_workers, ray.get(available_futures))  # type: ignore[reportGeneralTypeIssues]
+        for worker, available_slots in zip(
+            gpu_workers,
+            ray.get(available_futures),  # type: ignore[reportGeneralTypeIssues]
+            strict=True,
+        )
         if available_slots
     ]
 
@@ -132,11 +149,17 @@ def gpu_stealing_strategy(
 ) -> ObjectRef | None:
     logger = kargs["logger"]
 
-    available_futures = [worker.get_active_trials.remote() for worker in cpu_workers]
+    available_futures: list = [
+        worker.get_active_trials.remote() for worker in cpu_workers
+    ]
 
     running_cpu_workers = [
         (worker, min(activate_trials, key=lambda x: x.iteration))
-        for worker, activate_trials in zip(cpu_workers, ray.get(available_futures))  # type: ignore[reportGeneralTypeIssues]
+        for worker, activate_trials in zip(
+            cpu_workers,
+            ray.get(available_futures),  # type:int[reportGeneralTypeIssues]
+            strict=True,
+        )
         if len(activate_trials) > 0
     ]
 
@@ -304,7 +327,7 @@ class TrialScheduler:
             )
             self.logger.info(
                 "✅ 已完成的訓練任務列表: %s",
-                str({sorted([i.id for i in self.completed_trial_states])}),
+                str(sorted([i.id for i in self.completed_trial_states])),
             )
 
         elif status == TrialStatus.FAILED:

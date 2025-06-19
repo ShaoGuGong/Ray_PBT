@@ -158,18 +158,19 @@ if __name__ == "__main__":
     ray.init(
         runtime_env={
             "working_dir": ".",
-            "excludes": [".git", "test", "logs/*", "LICENSE", "README.md"],
+            "excludes": [".git", "test", "logs/*", "LICENSE", "README.md", ".venv"],
         },
     )
+    print("Start gen trial States")
     trial_states = generate_trial_states(3)
-    tuner = Tuner.options(  # type: ignore
+    tuner = Tuner.options(  # type: ignore[call-arg]
         max_concurrency=16,
         num_cpus=1,
         resources={f"node:{get_head_node_address()}": 0.01},
     ).remote(trial_states, train_step, cifar10_data_loader_factory)
-    ray.get(tuner.run.remote())
+    ray.get(tuner.run.remote())  # type: ignore[call-arg]
 
-    zip_logs_bytes: bytes = ray.get(tuner.get_zipped_log.remote())
+    zip_logs_bytes: bytes = ray.get(tuner.get_zipped_log.remote())  # type: ignore[call-arg]
 
     zip_output_dir = f"./logs/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}/"
     Path(zip_output_dir).mkdir(parents=True, exist_ok=True)
@@ -177,6 +178,6 @@ if __name__ == "__main__":
     with Path(zip_output_path).open("wb") as f:
         f.write(zip_logs_bytes)
 
-    unzip_file(zip_output_path, zip_output_dir)
+    unzip_file(zip_output_path, zip_output_dir)  # type: ignore[call-arg]
 
     ray.shutdown()
