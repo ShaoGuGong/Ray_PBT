@@ -2,49 +2,21 @@ import logging
 import os
 import random
 import zipfile
-from datetime import datetime
 from pathlib import Path
 
 import ray
 
 from .trial_scheduler import TrialScheduler
 from .trial_state import TrialResult, TrialState
-from .utils import DataloaderFactory, TrainStepFunction, WorkerType
+from .utils import DataloaderFactory, TrainStepFunction, WorkerType, get_tuner_logger
 from .worker import generate_all_workers
-
-
-def get_tuner_logger() -> logging.Logger:
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    log_dir = Path(Path.cwd()) / "logs" / timestamp
-    Path(log_dir).mkdir(parents=True, exist_ok=True)
-
-    logger = logging.getLogger("Tuner")
-
-    if not logger.handlers:
-        logger.setLevel(logging.DEBUG)  # 或者選擇更合適的級別
-
-        formatter = logging.Formatter(
-            "[%(asctime)s] %(levelname)s TUNER -- %(message)s",
-        )
-
-        stream_handler = logging.StreamHandler()
-        stream_handler.setLevel(logging.INFO)  # 只顯示 INFO 級別以上的訊息
-        stream_handler.setFormatter(formatter)
-        logger.addHandler(stream_handler)
-
-        file_handler = logging.FileHandler(Path(log_dir) / "tuner.log")
-        file_handler.setLevel(logging.DEBUG)  # 記錄所有級別的日誌
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-
-    return logger
 
 
 # NOTE:
 # model 的建立的時間,
 # batch_size 對於 throughput 計算
 @ray.remote
-class Tuner:
+class PBTTuner:
     def __init__(
         self,
         trial_states: list[TrialState],
@@ -87,11 +59,15 @@ class Tuner:
             self.trial_result.history_best[1],
         )
 
-    def get_quantile_trial(
+    def _get_quantile_trial(
         self,
         ratio: float = 0.25,
     ) -> tuple[list[TrialState], list[TrialState]]:
         return self.trial_result.get_quantile(ratio)
+
+    def is_mutation_trial(self, trial_state: TrialState) -> bool:
+        lower_quantile, _ = self._get_quantile_trial()
+        return trial_state in lower_quantile
 
     def record_trial_progress(self, trial_state: TrialState) -> None:
         self.trial_result.record_trial_progress(trial_state)
@@ -104,7 +80,7 @@ class Tuner:
             trial_state.hyperparameter,
         )
 
-        lower_quantile, upper_quantile = self.get_quantile_trial()
+        lower_quantile, upper_quantile = self._get_quantile_trial()
 
         chose_trial = random.choice(upper_quantile)
         hyperparameter = chose_trial.hyperparameter

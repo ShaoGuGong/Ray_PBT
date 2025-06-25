@@ -1,3 +1,4 @@
+import argparse
 from datetime import datetime
 from itertools import islice
 from pathlib import Path
@@ -11,14 +12,15 @@ from torch.utils.data import DataLoader
 from torchvision import models, transforms
 
 from src.config import DATASET_PATH, STOP_ITERATION
+from src.nes_tuner import NESTuner
+from src.pbt_tuner import PBTTuner
 from src.trial_state import TrialState
-from src.tuner import Tuner
-from src.utils import Hyperparameter, get_head_node_address, unzip_file
+from src.utils import Hyperparameter, TunerType, get_head_node_address, unzip_file
 
 
 def cifar10_data_loader_factory(
     batch_size: int = 64,
-) -> tuple[DataLoader, DataLoader, DataLoader]:
+) -> tuple[DataLoader, DataLoader]:
     data_dir = Path(DATASET_PATH).expanduser()
     if not Path(data_dir).exists():
         Path(data_dir).mkdir(parents=True, exist_ok=True)
@@ -61,17 +63,6 @@ def cifar10_data_loader_factory(
         transform=test_transform,
     )
 
-    # np.random.seed(42)
-    # indices = np.random.permutation(len(test_dataset))
-    # test_size = len(test_dataset) // 2
-    # test_indices = indices[:test_size]
-    # valid_indices = indices[test_size:]
-    #
-    # valid_dataset = Subset(test_dataset, valid_indices.tolist())
-    # test_dataset = Subset(test_dataset, test_indices.tolist())
-
-    # print(f"{len(train_dataset)=}, {len(valid_dataset)=}, {len(test_dataset)=}")
-
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -83,20 +74,7 @@ def cifar10_data_loader_factory(
         shuffle=False,
     )
 
-    # valid_loader = DataLoader(
-    #     valid_dataset,
-    #     batch_size=batch_size,
-    #     shuffle=True,
-    # )
-    #
-    # test_loader = DataLoader(
-    #     test_dataset,
-    #     batch_size=batch_size,
-    #     shuffle=False,
-    # )
-
-    # return train_loader, valid_loader, test_loader
-    return train_loader, valid_loader, None
+    return train_loader, valid_loader
 
 
 def resnet18_init_fn(
@@ -154,7 +132,7 @@ def train_step(
         optimizer.step()
 
 
-if __name__ == "__main__":
+def hyperparameter_optimize(tuner_type: TunerType) -> None:
     ray.init(
         runtime_env={
             "working_dir": ".",
@@ -163,11 +141,20 @@ if __name__ == "__main__":
     )
     print("Start gen trial States")
     trial_states = generate_trial_states(3)
-    tuner = Tuner.options(  # type: ignore[call-arg]
-        max_concurrency=16,
-        num_cpus=1,
-        resources={f"node:{get_head_node_address()}": 0.01},
-    ).remote(trial_states, train_step, cifar10_data_loader_factory)
+    match tuner_type:
+        case TunerType.NES:
+            tuner = NESTuner.options(  # type: ignore[call-arg]
+                max_concurrency=16,
+                num_cpus=1,
+                resources={f"node:{get_head_node_address()}": 0.01},
+            ).remote(trial_states, train_step, cifar10_data_loader_factory)
+        case TunerType.PBT:
+            tuner = PBTTuner.options(  # type: ignore[call-arg]
+                max_concurrency=16,
+                num_cpus=1,
+                resources={f"node:{get_head_node_address()}": 0.01},
+            ).remote(trial_states, train_step, cifar10_data_loader_factory)
+
     ray.get(tuner.run.remote())  # type: ignore[call-arg]
 
     zip_logs_bytes: bytes = ray.get(tuner.get_zipped_log.remote())  # type: ignore[call-arg]
@@ -181,3 +168,20 @@ if __name__ == "__main__":
     unzip_file(zip_output_path, zip_output_dir)  # type: ignore[call-arg]
 
     ray.shutdown()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--tuner_type",
+        type=TunerType,
+        choices=list(TunerType),
+        default=TunerType.PBT,
+        dest="tuner_type",
+    )
+    args = parser.parse_args()
+    hyperparameter_optimize(tuner_type=args.tuner_type)
+
+
+if __name__ == "__main__":
+    main()

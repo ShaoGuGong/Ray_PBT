@@ -184,19 +184,19 @@ class Worker:
                     TrialStatus.NEED_MUTATION,
                 }:
                     update_result_futures.append(
-                        self.tuner.submit_trial.remote(trial_state),
+                        self.tuner.submit_trial.remote(trial_state),  # type: ignore[reportGeneralTypeIssues]
                     )  # type: ignore[reportGeneralTypeIssues]
                     self.active_trials.pop(trial_state.id)
 
                 elif status == TrialStatus.INTERRUPTED:
                     update_result_futures.append(
-                        self.tuner.submit_trial.remote(trial_state),
+                        self.tuner.submit_trial.remote(trial_state),  # type: ignore[reportGeneralTypeIssues]
                     )  # type: ignore[reportGeneralTypeIssues]
                     self.active_trials.pop(trial_state.id)
                     continue
 
                 update_result_futures.append(
-                    self.tuner.update_trial_result.remote(trial_state),
+                    self.tuner.update_trial_result.remote(trial_state),  # type: ignore[reportGeneralTypeIssues]
                 )  # type: ignore[reportGeneralTypeIssues]
             ray.wait(update_result_futures, timeout=0.1)  # type: ignore[reportGeneralTypeIssues]
 
@@ -237,7 +237,7 @@ class Worker:
         try:
             hyper = trial_state.hyperparameter
             checkpoint = trial_state.checkpoint
-            train_loader, test_loader, _ = self.dataloader_factory(hyper.batch_size)
+            train_loader, test_loader = self.dataloader_factory(hyper.batch_size)
 
             model, optimizer = trial_state.model_init_fn()
             if checkpoint:
@@ -248,6 +248,8 @@ class Worker:
                 model.parameters(),
                 lr=hyper.lr,
                 momentum=hyper.momentum,
+                weight_decay=hyper.weight_decay,
+                dampening=hyper.dampening,
             )  # type: ignore[reportGeneralTypeIssues]
             if checkpoint:
                 optimizer.load_state_dict(checkpoint.optimizer_state_dict)
@@ -255,6 +257,8 @@ class Worker:
             for param_group in optimizer.param_groups:
                 param_group["lr"] = hyper.lr
                 param_group["momentum"] = hyper.momentum
+                param_group["weight_decay"] = hyper.weight_decay
+                param_group["dampening"] = hyper.dampening
 
         except Exception as e:
             self.log("error", f"{type(e).__name__}: {e}", trial_state.id)
@@ -349,10 +353,10 @@ class Worker:
             return trial_state
 
         ray.get(
-            self.tuner.record_trial_progress.remote(trial_state.without_checkpoint()),
+            self.tuner.record_trial_progress.remote(trial_state.without_checkpoint()),  # type: ignore[reportGeneralTypeIssues]
         )
-        lower_quantile, _ = ray.get(self.tuner.get_quantile_trial.remote())
-        if trial_state in lower_quantile:
+
+        if ray.get(self.tuner.is_mutation_trial.remote(trial_state)):  # type: ignore[reportGeneralTypeIssues]
             self.need_mutation_trial(trial_state)
         trial_state.update_checkpoint(model, optimizer)
         return trial_state
@@ -559,7 +563,7 @@ def generate_all_workers(
                 resources={worker_state.node_name: 0.01},
             ).remote(
                 worker_state,
-                train_step=train_step,
+                train_step=train_step,  # type: ignore[reportGeneralTypeIssues]
                 tuner=tuner,
                 trial_phase=TrialPhase(STOP_ITERATION, PHASE_ITERATION),
                 dataloader_factory=dataloader_factory,
