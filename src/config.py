@@ -15,11 +15,14 @@ PHASE_ITERATION = config.get("phase_iteration", 250)
 MUTATION_ITERATION = config.get("mutation_iteration", 50)
 GPU_MAX_ITERATION = config.get("gpu_max_iteration", 150)
 TRIAL_RESULT_OUTPUT_PATH = Path(
-    config.get("trial_result_output_path", "~/Documents/Ray_PBT/trial_result.output"),
+    config.get(
+        "trial_result_output_path",
+        "~/Documents/workspace/Ray_PBT/trial_result.output",
+    ),
 ).expanduser()
 TRIAL_PROGRESS_OUTPUT_PATH = Path(
     config.get(
         "trial_progress_output_path",
-        "~/Documents/Ray_PBT/trial_progress.output",
+        "~/Documents/workspace/Ray_PBT/trial_progress.output",
     ),
 ).expanduser()

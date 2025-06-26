@@ -248,8 +248,6 @@ class Worker:
                 model.parameters(),
                 lr=hyper.lr,
                 momentum=hyper.momentum,
-                weight_decay=hyper.weight_decay,
-                dampening=hyper.dampening,
             )  # type: ignore[reportGeneralTypeIssues]
             if checkpoint:
                 optimizer.load_state_dict(checkpoint.optimizer_state_dict)
@@ -257,8 +255,6 @@ class Worker:
             for param_group in optimizer.param_groups:
                 param_group["lr"] = hyper.lr
                 param_group["momentum"] = hyper.momentum
-                param_group["weight_decay"] = hyper.weight_decay
-                param_group["dampening"] = hyper.dampening
 
         except Exception as e:
             self.log("error", f"{type(e).__name__}: {e}", trial_state.id)

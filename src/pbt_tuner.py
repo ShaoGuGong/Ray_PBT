@@ -8,7 +8,12 @@ import ray
 
 from .trial_scheduler import TrialScheduler
 from .trial_state import TrialResult, TrialState
-from .utils import DataloaderFactory, TrainStepFunction, WorkerType, get_tuner_logger
+from .utils import (
+    DataloaderFactory,
+    TrainStepFunction,
+    WorkerType,
+    get_tuner_logger,
+)
 from .worker import generate_all_workers
 
 
@@ -26,8 +31,8 @@ class PBTTuner:
         self.trial_states = trial_states
         self.logger = get_tuner_logger()
 
-        self.logger.info("總共 %d 個 Trial", len(trial_states))
-        self.logger.info("\n".join([str(t.hyperparameter) for t in trial_states]))
+        self.logger.info("總共 %d 個 Trial", len(self.trial_states))
+        self.logger.info("\n".join([str(t.hyperparameter) for t in self.trial_states]))
 
         self.workers = generate_all_workers(
             ray.get_runtime_context().current_actor,
@@ -38,7 +43,7 @@ class PBTTuner:
         self.scheduler: TrialScheduler = TrialScheduler(
             ray.get_runtime_context().current_actor,
             self.workers,
-            trial_states,
+            self.trial_states,
         )
         self.trial_result: TrialResult = TrialResult()
 
@@ -50,6 +55,11 @@ class PBTTuner:
         self.scheduler.run()
         self.logger.info("結束訓練")
         self.scheduler.get_workers_logs()
+        log_file = Path(
+            "~/Documents/workspace/shaogu/Ray_PBT/accuracy.log",
+        ).expanduser()
+        with log_file.open("a") as f:
+            f.write(f"Use PBT Accuracy: {self.trial_result.history_best[0]:.6f}\n")
 
     def update_trial_result(self, trial_state: TrialState) -> None:
         self.trial_result.update_trial_result(trial_state)
@@ -80,7 +90,7 @@ class PBTTuner:
             trial_state.hyperparameter,
         )
 
-        lower_quantile, upper_quantile = self._get_quantile_trial()
+        _, upper_quantile = self._get_quantile_trial()
 
         chose_trial = random.choice(upper_quantile)
         hyperparameter = chose_trial.hyperparameter

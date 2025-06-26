@@ -17,6 +17,7 @@ from numpy.random import Generator
 from scipy.linalg import expm
 from torch import nn, optim
 from torch.utils.data import DataLoader
+from torchvision import models
 
 # ╭──────────────────────────────────────────────────────────╮
 # │                          Enums                           │
@@ -24,8 +25,8 @@ from torch.utils.data import DataLoader
 
 
 class TunerType(Enum):
-    PBT = auto()
     NES = auto()
+    PBT = auto()
 
 
 class ModelType(Enum):
@@ -80,27 +81,23 @@ class WorkerState:
 class Hyperparameter:
     lr: float
     momentum: float
-    weight_decay: float
-    dampening: float
     batch_size: int
     model_type: ModelType
 
     def __str__(self) -> str:
         return (
-            f"Hyperparameter(lr:{self.lr:.3f}, momentum:{self.momentum:.3f} "
+            f"Hyperparameter(lr:{self.lr:.3f}, momentum:{self.momentum:.3f}, "
             f"batch_size:{self.batch_size:4d}, model_type:{self.model_type})"
         )
 
     def to_ndarray(self) -> NDArray[np.floating]:
-        return np.array([self.lr, self.momentum, self.weight_decay, self.dampening])
+        return np.array([self.lr, self.momentum])
 
     @classmethod
     def random(cls) -> "Hyperparameter":
         return cls(
             lr=random.uniform(0.001, 1),
             momentum=random.uniform(0.001, 1),
-            weight_decay=random.uniform(1e-5, 1e-3),
-            dampening=random.uniform(1e-5, 1e-3),
             batch_size=512,
             model_type=ModelType.RESNET_18,
         )
@@ -112,10 +109,18 @@ class Fitness:
     hyperparameter: Hyperparameter
 
 
-class NaturalGradients(NamedTuple):
+@dataclass
+class NaturalGradients:
     sigma_gradient: np.floating
     delta_gradient: NDArray[np.floating]
     b_gradient: NDArray[np.floating]
+
+    def __str__(self) -> str:
+        return (
+            f"NaturalGradients(sigma_gradient: {self.sigma_gradient:.3f}, "
+            f"delta_gradient: {self.delta_gradient}, "
+            f"b_gradient: {self.b_gradient})"
+        )
 
 
 @dataclass
@@ -150,68 +155,16 @@ class Distribution:
         denominator = sum(utilities_raw)
         return [u / denominator - 1.0 / size for u in utilities_raw]
 
-    @staticmethod
-    def mapping(x: NDArray[np.floating]) -> NDArray[np.floating]:
-        """
-        Map real number x ∈ ℝ to [0, 1] using tanh
-
-        Args:
-            x (float): Real input value
-
-        Returns:
-            float: Output in [0, 1]
-
-        Example:
-            >>> round(Hyperparameter.mapping(0), 3)
-            0.5
-        """
-        y = np.tanh(x) / 2.0 + 0.5
-        assert np.all((y >= 0.0) & (y <= 1.0)), f"Mapping Error output is {y}"
-        return y
-
-    @staticmethod
-    def inverse_mapping(y: NDArray[np.floating]) -> NDArray[np.floating]:
-        """
-        Map [0, 1] to ℝ using arctanh
-
-        Args:
-            y (float): Input in [0, 1]
-
-        Returns:
-            float: Real number
-
-        Example:
-            >>> x = 0.5
-            >>> Hyperparameter.inverse_mapping(x)
-            0.0
-        """
-        assert np.all((y >= 0.0) & (y <= 1.0)), "Input y is contrains invalid number"
-        return np.arctanh(2.0 * y - 1.0)
-
     @classmethod
     def get_random_ditribution(cls) -> "Distribution":
         random_generator = np.random.default_rng()
-        init_hyper = np.concatenate(
-            [
-                random_generator.uniform(
-                    1e-4,
-                    1e-1,
-                    size=1,
-                ),
-                random_generator.uniform(
-                    3e-1,
-                    9e-1,
-                    size=1,
-                ),
-                random_generator.uniform(
-                    1e-6,
-                    2e-5,
-                    size=2,
-                ),
-            ],
+        init_hyper = random_generator.uniform(
+            0.0,
+            1.0,
+            size=2,
         )
 
-        diag_vals = random_generator.uniform(0.8, 1.5, size=len(init_hyper))
+        diag_vals = random_generator.uniform(0.5, 1.0, size=len(init_hyper))
         covariance = np.diag(diag_vals)
         square_root_of_covariance = np.linalg.cholesky(covariance).T
         mean = np.array(init_hyper)
@@ -226,12 +179,16 @@ class Distribution:
         )
 
     def get_new_hyper(self) -> Hyperparameter:
-        sample: NDArray[np.floating] = self.random_generator.multivariate_normal(
-            mean=np.zeros(self.mean.size),
-            cov=np.eye(self.mean.size),
-        )
-        moddify_sample: np.ndarray = self.mean + self.sigma * (self.b_matrix @ sample)
-        parameter: list[float] = Distribution.mapping(moddify_sample).tolist()
+        modified_sample: np.ndarray | None = None
+        while modified_sample is None or np.any(
+            (modified_sample <= 0.0) | (modified_sample >= 1.0),
+        ):
+            sample: NDArray[np.floating] = self.random_generator.multivariate_normal(
+                mean=np.zeros(self.mean.size),
+                cov=np.eye(self.mean.size),
+            )
+            modified_sample = self.mean + self.sigma * (self.b_matrix @ sample)
+        parameter: list[float] = modified_sample.tolist()
         return Hyperparameter(
             *parameter,
             batch_size=512,
@@ -239,24 +196,39 @@ class Distribution:
         )
 
     def update_distribution(self, fitnesses: list[Fitness]) -> None:
-        gradients: NaturalGradients = self._commpute_gradient(fitnesses=fitnesses)
-        dimension = 4
-        mean_stride = 1.0
-        b_matrix_stride = (9 + 3 * np.log(dimension)) / (
-            5 * dimension * np.sqrt(dimension)
+        gradients: NaturalGradients = self._compute_gradient(fitnesses=fitnesses)
+        dimension = len(self.mean)
+        mean_stride = 1.0 / dimension
+        b_matrix_stride = (
+            (9 + 3 * np.log(dimension))
+            / (5 * dimension * np.sqrt(dimension))
+            / dimension
         )
-        sigma_stride = (9 + 3 * np.log(dimension)) / (
-            5 * dimension * np.sqrt(dimension)
+        sigma_stride = (
+            (9 + 3 * np.log(dimension))
+            / (5 * dimension * np.sqrt(dimension))
+            / dimension
         )
-        self.mean += (
+        self.mean = self.mean + (
             mean_stride * self.sigma * (self.b_matrix @ gradients.delta_gradient)
         )
-        self.sigma *= np.exp((sigma_stride / 2) * gradients.sigma_gradient)
+        self.sigma = self.sigma * np.exp((sigma_stride / 2) * gradients.sigma_gradient)
         self.b_matrix = self.b_matrix @ expm(
             (b_matrix_stride / 2) * gradients.b_gradient,
         )
+        log_file = Path("~/Documents/workspace/shaogu/Ray_PBT/nes.log").expanduser()
+        with log_file.open("a") as f:
+            message = (
+                f"Distribution(mean:{self.mean}"
+                f", sigma:{self.sigma}, b_matrix:{self.b_matrix})"
+            )
 
-    def _commpute_gradient(
+            f.write(message)
+            f.write("\n")
+            f.write(str(gradients))
+            f.write("\n")
+
+    def _compute_gradient(
         self,
         fitnesses: list[Fitness],
     ) -> NaturalGradients:
@@ -272,32 +244,24 @@ class Distribution:
         sorted_fitnesses = sorted(fitnesses, key=lambda x: x.accuracy, reverse=True)
         utilities = Distribution.fitness_shaping(sorted_fitnesses)
         shaping_fitnesses = [
-            Fitness(accuracy=utility, hyperparameter=fitness.hyperparameter)
+            (utility, fitness.hyperparameter)
             for utility, fitness in zip(utilities, sorted_fitnesses, strict=True)
         ]
         delta_gradient = np.sum(
-            [
-                fitness.accuracy
-                * Distribution.inverse_mapping(fitness.hyperparameter.to_ndarray())
-                for fitness in shaping_fitnesses
-            ],
+            [u * h.to_ndarray() for u, h in shaping_fitnesses],
             axis=0,
         )
         m_gradient = np.sum(
             [
-                fitness.accuracy
+                u
                 * (
                     np.outer(
-                        Distribution.inverse_mapping(
-                            fitness.hyperparameter.to_ndarray(),
-                        ),
-                        Distribution.inverse_mapping(
-                            fitness.hyperparameter.to_ndarray(),
-                        ),
+                        h.to_ndarray(),
+                        h.to_ndarray(),
                     )
                     - np.eye(self.mean.size)
                 )
-                for fitness in shaping_fitnesses
+                for u, h in shaping_fitnesses
             ],
             axis=0,
         )

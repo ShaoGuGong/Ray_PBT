@@ -1,7 +1,9 @@
+#! /usr/bin/env python3
 import argparse
 from datetime import datetime
-from itertools import islice
+from itertools import islice, repeat
 from pathlib import Path
+from time import perf_counter
 
 import ray
 import torch
@@ -15,7 +17,13 @@ from src.config import DATASET_PATH, STOP_ITERATION
 from src.nes_tuner import NESTuner
 from src.pbt_tuner import PBTTuner
 from src.trial_state import TrialState
-from src.utils import Hyperparameter, TunerType, get_head_node_address, unzip_file
+from src.utils import (
+    Distribution,
+    Hyperparameter,
+    TunerType,
+    get_head_node_address,
+    unzip_file,
+)
 
 
 def cifar10_data_loader_factory(
@@ -90,7 +98,7 @@ def resnet18_init_fn(
     return model, optimizer
 
 
-def generate_trial_states(n: int = 1) -> list[TrialState]:
+def generate_trial_states(n: int) -> list[TrialState]:
     return [
         TrialState(
             i,
@@ -100,17 +108,6 @@ def generate_trial_states(n: int = 1) -> list[TrialState]:
         )
         for i in range(n)
     ]
-
-
-def get_resnet18(hyperparameter: Hyperparameter) -> tuple[nn.Module, optim.Optimizer]:
-    model = models.resnet18()
-    model.fc = nn.Linear(model.fc.in_features, 10)
-    optimizer = optim.SGD(
-        model.parameters(),
-        lr=hyperparameter.lr,
-        momentum=hyperparameter.momentum,
-    )
-    return model, optimizer
 
 
 def train_step(
@@ -133,6 +130,7 @@ def train_step(
 
 
 def hyperparameter_optimize(tuner_type: TunerType) -> None:
+    start = perf_counter()
     ray.init(
         runtime_env={
             "working_dir": ".",
@@ -140,15 +138,31 @@ def hyperparameter_optimize(tuner_type: TunerType) -> None:
         },
     )
     print("Start gen trial States")
-    trial_states = generate_trial_states(3)
     match tuner_type:
         case TunerType.NES:
+            distribution: Distribution = Distribution.get_random_ditribution()
+            trial_states = [
+                TrialState(
+                    i,
+                    distribution.get_new_hyper(),
+                    model_init_fn=resnet18_init_fn,
+                    stop_iteration=STOP_ITERATION,
+                )
+                for i in range(8)
+            ]
+
             tuner = NESTuner.options(  # type: ignore[call-arg]
                 max_concurrency=16,
                 num_cpus=1,
                 resources={f"node:{get_head_node_address()}": 0.01},
-            ).remote(trial_states, train_step, cifar10_data_loader_factory)
+            ).remote(
+                trial_states,
+                train_step,
+                cifar10_data_loader_factory,
+                distribution,
+            )
         case TunerType.PBT:
+            trial_states = generate_trial_states(8)
             tuner = PBTTuner.options(  # type: ignore[call-arg]
                 max_concurrency=16,
                 num_cpus=1,
@@ -168,19 +182,32 @@ def hyperparameter_optimize(tuner_type: TunerType) -> None:
     unzip_file(zip_output_path, zip_output_dir)  # type: ignore[call-arg]
 
     ray.shutdown()
+    log_file = Path("~/Documents/workspace/shaogu/Ray_PBT/time.log").expanduser()
+    with log_file.open("a") as f:
+        f.write(f"{tuner_type} use time: {perf_counter() - start}\n")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--tuner_type",
-        type=TunerType,
-        choices=list(TunerType),
-        default=TunerType.PBT,
+        type=str,
+        choices=["NES", "PBT", "COM"],
+        default="COM",
         dest="tuner_type",
     )
     args = parser.parse_args()
-    hyperparameter_optimize(tuner_type=args.tuner_type)
+    tuner_type: TunerType | None = None
+    if args.tuner_type == "COM":
+        for _ in repeat(10):
+            hyperparameter_optimize(tuner_type=TunerType.PBT)
+            hyperparameter_optimize(tuner_type=TunerType.NES)
+    elif args.tuner_type == "NES":
+        tuner_type = TunerType.NES
+        hyperparameter_optimize(tuner_type=tuner_type)
+    elif args.tuner_type == "PBT":
+        tuner_type = TunerType.PBT
+        hyperparameter_optimize(tuner_type=tuner_type)
 
 
 if __name__ == "__main__":

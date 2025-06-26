@@ -27,12 +27,13 @@ class NESTuner:
         trial_states: list[TrialState],
         train_step: TrainStepFunction,
         dataloader_factory: DataloaderFactory,
+        distribution: Distribution,
     ) -> None:
         self.trial_states = trial_states
         self.logger = get_tuner_logger()
 
-        self.logger.info("總共 %d 個 Trial", len(trial_states))
-        self.logger.info("\n".join([str(t.hyperparameter) for t in trial_states]))
+        self.logger.info("總共 %d 個 Trial", len(self.trial_states))
+        self.logger.info("\n".join([str(t.hyperparameter) for t in self.trial_states]))
 
         self.workers = generate_all_workers(
             ray.get_runtime_context().current_actor,
@@ -43,10 +44,10 @@ class NESTuner:
         self.scheduler: TrialScheduler = TrialScheduler(
             ray.get_runtime_context().current_actor,
             self.workers,
-            trial_states,
+            self.trial_states,
         )
         self.trial_result: TrialResult = TrialResult()
-        self.ditribution: Distribution = Distribution.get_random_ditribution()
+        self.ditribution: Distribution = distribution
         self.population_size = 8
         self.fitnesses: deque[Fitness] = deque(maxlen=self.population_size)
 
@@ -58,6 +59,11 @@ class NESTuner:
         self.scheduler.run()
         self.logger.info("結束訓練")
         self.scheduler.get_workers_logs()
+        log_file = Path(
+            "~/Documents/workspace/shaogu/Ray_PBT/accuracy.log",
+        ).expanduser()
+        with log_file.open("a") as f:
+            f.write(f"Use NES Accuracy: {self.trial_result.history_best[0]:.6f}\n")
 
     def update_trial_result(self, trial_state: TrialState) -> None:
         self.trial_result.update_trial_result(trial_state)
@@ -87,21 +93,23 @@ class NESTuner:
                 hyperparameter=trial_state.hyperparameter,
             ),
         )
-        if len(self.fitnesses) < self.population_size:
-            return trial_state
 
         self.logger.info(
             "Trial %d: 執行mutation, 原始超參數: %s",
             trial_state.id,
             trial_state.hyperparameter,
         )
-        self.ditribution.update_distribution(list(self.fitnesses))
-        new_hyper = self.ditribution.get_new_hyper()
-        _, upper_quantile = self._get_quantile_trial()
-        chose_trial = random.choice(upper_quantile)
-        trial_state.hyperparameter = new_hyper
-        trial_state.checkpoint = chose_trial.checkpoint
 
+        if len(self.fitnesses) >= self.population_size:
+            self.ditribution.update_distribution(list(self.fitnesses))
+
+        new_hyper = self.ditribution.get_new_hyper()
+        trial_state.hyperparameter = new_hyper
+        # _, upper_quantile = self._get_quantile_trial()
+        # if upper_quantile:
+        #     chose_trial = random.choice(upper_quantile)
+        #     trial_state.checkpoint = chose_trial.checkpoint
+        #
         self.logger.info(
             "Trial-%d Iter-%d, 結束mutation, 新超參數: %s",
             trial_state.id,
