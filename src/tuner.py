@@ -17,6 +17,14 @@ from .worker import generate_all_workers
 
 
 class Tuner:
+    __slots__ = {
+        "logger",
+        "scheduler",
+        "trial_result",
+        "trial_states",
+        "workers",
+    }
+
     def __init__(
         self,
         trial_states: list[TrialState],

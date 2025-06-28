@@ -16,6 +16,12 @@ from .utils import (
 
 @ray.remote
 class NESTuner(Tuner):
+    __slots__ = {
+        "distribution",
+        "fitnesses",
+        "population_size",
+    }
+
     def __init__(
         self,
         trial_states: list[TrialState],
@@ -29,7 +35,7 @@ class NESTuner(Tuner):
             dataloader_factory,
         )
         self.ditribution: Distribution = distribution
-        self.population_size = 8
+        self.population_size = 10
         self.fitnesses: deque[Fitness] = deque(maxlen=self.population_size)
 
     def run(self) -> None:
