@@ -81,23 +81,28 @@ class WorkerState:
 class Hyperparameter:
     lr: float
     momentum: float
+    weight_decay: float
+    dampening: float
     batch_size: int
     model_type: ModelType
 
     def __str__(self) -> str:
         return (
-            f"Hyperparameter(lr:{self.lr:.3f}, momentum:{self.momentum:.3f}, "
+            f"Hyperparameter(lr:{self.lr:.6f}, momentum:{self.momentum:.6f}, "
+            f"weight_decay:{self.weight_decay:.6f}, dampening:{self.dampening:.6f}, "
             f"batch_size:{self.batch_size:4d}, model_type:{self.model_type})"
         )
 
     def to_ndarray(self) -> NDArray[np.floating]:
-        return np.array([self.lr, self.momentum])
+        return np.array([self.lr, self.momentum, self.weight_decay, self.dampening])
 
     @classmethod
     def random(cls) -> "Hyperparameter":
         return cls(
             lr=random.uniform(0.001, 1),
             momentum=random.uniform(0.001, 1),
+            weight_decay=random.uniform(1e-6, 1e-3),
+            dampening=random.uniform(1e-6, 1e-3),
             batch_size=512,
             model_type=ModelType.RESNET_18,
         )
@@ -158,13 +163,24 @@ class Distribution:
     @classmethod
     def get_random_ditribution(cls) -> "Distribution":
         random_generator = np.random.default_rng()
-        init_hyper = random_generator.uniform(
-            0.0,
-            1.0,
-            size=2,
+        init_hyper = np.concat(
+            [
+                random_generator.uniform(
+                    0.001,
+                    1.0,
+                    size=2,
+                ),
+                random_generator.uniform(
+                    1e-6,
+                    1e-3,
+                    size=2,
+                ),
+            ],
         )
 
-        diag_vals = random_generator.uniform(0.1, 0.2, size=len(init_hyper))
+        diag_vals = (
+            random_generator.uniform(0.1, 0.2, size=len(init_hyper)) * init_hyper
+        )
         covariance = np.diag(diag_vals)
         square_root_of_covariance = np.linalg.cholesky(covariance).T
         mean = np.array(init_hyper)

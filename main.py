@@ -1,7 +1,8 @@
 #! /usr/bin/env python3
 import argparse
+from collections.abc import Callable
 from datetime import datetime
-from itertools import islice, repeat
+from itertools import islice
 from pathlib import Path
 from time import perf_counter
 
@@ -88,21 +89,36 @@ def cifar10_data_loader_factory(
 def resnet18_init_fn(
     hyperparameter: Hyperparameter,
 ) -> tuple[nn.Module, optim.Optimizer]:
-    model = models.resnet18()
-    model.fc = nn.Linear(model.fc.in_features, 10)
+    model = models.resnet18(num_classes=10)
     optimizer = optim.SGD(
         model.parameters(),
         lr=hyperparameter.lr,
         momentum=hyperparameter.momentum,
+        weight_decay=hyperparameter.weight_decay,
+        dampening=hyperparameter.dampening,
     )
     return model, optimizer
 
 
-def generate_trial_states(n: int) -> list[TrialState]:
+def generate_trial_states(
+    n: int,
+    random_fn: Callable | None = None,
+) -> list[TrialState]:
+    if random_fn is None:
+        return [
+            TrialState(
+                i,
+                Hyperparameter.random(),
+                model_init_fn=resnet18_init_fn,
+                stop_iteration=STOP_ITERATION,
+            )
+            for i in range(n)
+        ]
+
     return [
         TrialState(
             i,
-            Hyperparameter.random(),
+            random_fn(),
             model_init_fn=resnet18_init_fn,
             stop_iteration=STOP_ITERATION,
         )
@@ -137,20 +153,10 @@ def hyperparameter_optimize(tuner_type: TunerType) -> None:
             "excludes": [".git", "test", "logs/*", "LICENSE", "README.md", ".venv"],
         },
     )
-    print("Start gen trial States")
     match tuner_type:
         case TunerType.NES:
             distribution: Distribution = Distribution.get_random_ditribution()
-            trial_states = [
-                TrialState(
-                    i,
-                    distribution.get_new_hyper(),
-                    model_init_fn=resnet18_init_fn,
-                    stop_iteration=STOP_ITERATION,
-                )
-                for i in range(8)
-            ]
-
+            trial_states = generate_trial_states(10, distribution.get_new_hyper)
             tuner = NESTuner.options(  # type: ignore[call-arg]
                 max_concurrency=5,
                 num_cpus=1,
@@ -162,7 +168,7 @@ def hyperparameter_optimize(tuner_type: TunerType) -> None:
                 distribution,
             )
         case TunerType.PBT:
-            trial_states = generate_trial_states(8)
+            trial_states = generate_trial_states(10)
             tuner = PBTTuner.options(  # type: ignore[call-arg]
                 max_concurrency=5,
                 num_cpus=1,
