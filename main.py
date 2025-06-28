@@ -203,6 +203,7 @@ def main() -> None:
         choices=["NES", "PBT", "COM"],
         default="COM",
         dest="tuner_type",
+        help="Select the Tuner type of NES, PBT or COM(comparison PBT and NES)",
     )
     args = parser.parse_args()
     tuner_type: TunerType | None = None
