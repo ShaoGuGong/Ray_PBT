@@ -352,7 +352,7 @@ class Worker:
             self.tuner.record_trial_progress.remote(trial_state.without_checkpoint()),  # type: ignore[reportGeneralTypeIssues]
         )
 
-        if ray.get(self.tuner.is_mutation_trial.remote(trial_state)):  # type: ignore[reportGeneralTypeIssues]
+        if ray.get(self.tuner.should_mutate_trial.remote(trial_state)):  # type: ignore[reportGeneralTypeIssues]
             self.need_mutation_trial(trial_state)
         trial_state.update_checkpoint(model, optimizer)
         return trial_state

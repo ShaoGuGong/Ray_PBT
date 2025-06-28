@@ -164,7 +164,7 @@ class Distribution:
             size=2,
         )
 
-        diag_vals = random_generator.uniform(0.5, 1.0, size=len(init_hyper))
+        diag_vals = random_generator.uniform(0.1, 0.2, size=len(init_hyper))
         covariance = np.diag(diag_vals)
         square_root_of_covariance = np.linalg.cholesky(covariance).T
         mean = np.array(init_hyper)
@@ -216,7 +216,9 @@ class Distribution:
         self.b_matrix = self.b_matrix @ expm(
             (b_matrix_stride / 2) * gradients.b_gradient,
         )
-        log_file = Path("~/Documents/workspace/shaogu/Ray_PBT/nes.log").expanduser()
+        log_dir = Path("~/Documents/workspace/shaogu/Ray_PBT/log/").expanduser()
+        log_dir.mkdir(exist_ok=True)
+        log_file = log_dir / "nes.log"
         with log_file.open("a") as f:
             message = (
                 f"Distribution(mean:{self.mean}"

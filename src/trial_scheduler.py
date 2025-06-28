@@ -271,7 +271,7 @@ class TrialScheduler:
 
         if not self.is_final_phase and (
             self.trial_state_nums - len(self.completed_trial_states)
-        ) < (len(self.gpu_workers) * 4 + len(self.cpu_workers)):
+        ) < (len(self.gpu_workers) + len(self.cpu_workers)):
             self.logger.info("已到最後階段 開始執行搶奪")
             self.is_final_phase = True
 
@@ -311,7 +311,7 @@ class TrialScheduler:
             )
 
         elif status == TrialStatus.NEED_MUTATION:
-            trial_state = ray.get(self.tuner.mutation.remote(trial_state))  # type: ignore[reportGeneralTypeIssues]
+            trial_state = ray.get(self.tuner.mutate_trial.remote(trial_state))  # type: ignore[reportGeneralTypeIssues]
             if trial_state.checkpoint is None:
                 self.logger.debug("Trial %d checkpoint is None", trial_state.id)
             trial_state.status = TrialStatus.PENDING

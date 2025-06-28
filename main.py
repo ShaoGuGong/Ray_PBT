@@ -152,7 +152,7 @@ def hyperparameter_optimize(tuner_type: TunerType) -> None:
             ]
 
             tuner = NESTuner.options(  # type: ignore[call-arg]
-                max_concurrency=16,
+                max_concurrency=5,
                 num_cpus=1,
                 resources={f"node:{get_head_node_address()}": 0.01},
             ).remote(
@@ -164,7 +164,7 @@ def hyperparameter_optimize(tuner_type: TunerType) -> None:
         case TunerType.PBT:
             trial_states = generate_trial_states(8)
             tuner = PBTTuner.options(  # type: ignore[call-arg]
-                max_concurrency=16,
+                max_concurrency=5,
                 num_cpus=1,
                 resources={f"node:{get_head_node_address()}": 0.01},
             ).remote(trial_states, train_step, cifar10_data_loader_factory)
@@ -182,7 +182,9 @@ def hyperparameter_optimize(tuner_type: TunerType) -> None:
     unzip_file(zip_output_path, zip_output_dir)  # type: ignore[call-arg]
 
     ray.shutdown()
-    log_file = Path("~/Documents/workspace/shaogu/Ray_PBT/time.log").expanduser()
+    log_dir = Path("~/Documents/workspace/shaogu/Ray_PBT/log").expanduser()
+    log_dir.mkdir(exist_ok=True)
+    log_file = log_dir / "time.log"
     with log_file.open("a") as f:
         f.write(f"{tuner_type} use time: {perf_counter() - start}\n")
 
@@ -199,15 +201,17 @@ def main() -> None:
     args = parser.parse_args()
     tuner_type: TunerType | None = None
     if args.tuner_type == "COM":
-        for _ in repeat(10):
-            hyperparameter_optimize(tuner_type=TunerType.PBT)
-            hyperparameter_optimize(tuner_type=TunerType.NES)
+        hyperparameter_optimize(tuner_type=TunerType.PBT)
+        hyperparameter_optimize(tuner_type=TunerType.NES)
     elif args.tuner_type == "NES":
         tuner_type = TunerType.NES
         hyperparameter_optimize(tuner_type=tuner_type)
     elif args.tuner_type == "PBT":
         tuner_type = TunerType.PBT
         hyperparameter_optimize(tuner_type=tuner_type)
+    else:
+        error_message = f"Unknown tuner type: {args.tuner_type}"
+        raise ValueError(error_message)
 
 
 if __name__ == "__main__":
