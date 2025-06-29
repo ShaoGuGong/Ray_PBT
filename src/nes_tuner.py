@@ -1,5 +1,4 @@
 import random
-from collections import deque
 from pathlib import Path
 
 import ray
@@ -18,8 +17,6 @@ from .utils import (
 class NESTuner(Tuner):
     __slots__ = {
         "distribution",
-        "fitnesses",
-        "population_size",
     }
 
     def __init__(
@@ -35,8 +32,6 @@ class NESTuner(Tuner):
             dataloader_factory,
         )
         self.ditribution: Distribution = distribution
-        self.population_size = 10
-        self.fitnesses: deque[Fitness] = deque(maxlen=self.population_size)
 
     def run(self) -> None:
         super().run()
@@ -52,15 +47,13 @@ class NESTuner(Tuner):
     ) -> tuple[list[TrialState], list[TrialState]]:
         return self.trial_result.get_quantile(ratio)
 
-    def should_mutate_trial(self, trial_state: TrialState) -> bool:
+    def should_mutate_trial(self, _: TrialState) -> bool:  # type: ignore[override]
         return True
 
     def mutate_trial(self, trial_state: TrialState) -> TrialState:
-        self.fitnesses.append(
-            Fitness(
-                accuracy=trial_state.accuracy,
-                hyperparameter=trial_state.hyperparameter,
-            ),
+        fitness = Fitness(
+            fitness=trial_state.accuracy,
+            hyperparameter=trial_state.hyperparameter,
         )
 
         self.logger.info(
@@ -69,8 +62,7 @@ class NESTuner(Tuner):
             trial_state.hyperparameter,
         )
 
-        if len(self.fitnesses) >= self.population_size:
-            self.ditribution.update_distribution(list(self.fitnesses))
+        self.ditribution.update_distribution(fitness=fitness)
 
         new_hyper = self.ditribution.get_new_hyper()
         trial_state.hyperparameter = new_hyper

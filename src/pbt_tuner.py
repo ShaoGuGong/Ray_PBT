@@ -41,17 +41,20 @@ class PBTTuner(Tuner):
 
         _, upper_quantile = self._get_quantile_trial()
 
+        r = random.randint(1, 100)
         chose_trial = random.choice(upper_quantile)
-        hyper = chose_trial.hyperparameter
-        perturbation = np.array([random.choice([0.8, 1.2, 1.0, 1.0])] * 4)
-        hyperparameter = hyper * perturbation
-
-        trial_state.hyperparameter = Hyperparameter(
-            *hyperparameter,
-            batch_size=512,
-            model_type=ModelType.RESNET_18,
-        )
         trial_state.checkpoint = chose_trial.checkpoint
+        if r <= 25:
+            trial_state.hyperparameter = Hyperparameter.random()
+        else:
+            hyper = chose_trial.hyperparameter
+            perturbation = np.array([random.choice([0.8, 1.2, 1.0, 1.0])] * 4)
+            hyperparameter = hyper * perturbation
+            trial_state.hyperparameter = Hyperparameter(
+                *hyperparameter,
+                batch_size=512,
+                model_type=ModelType.RESNET_18,
+            )
 
         self.logger.info(
             "Trial-%d Iter-%d, 結束mutation, 新超參數: %s",

@@ -2,13 +2,14 @@ import logging
 import math
 import random
 import zipfile
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum, auto
 from functools import reduce
 from pathlib import Path
-from typing import Any, NamedTuple, Protocol, TypeVar
+from typing import Any, Protocol, TypeVar
 
 import numpy as np
 import ray
@@ -17,7 +18,6 @@ from numpy.random import Generator
 from scipy.linalg import expm
 from torch import nn, optim
 from torch.utils.data import DataLoader
-from torchvision import models
 
 # ╭──────────────────────────────────────────────────────────╮
 # │                          Enums                           │
@@ -61,9 +61,9 @@ class DatasetType(Enum):
     IMAGENET = auto()
 
 
-#                         ╭─────────────────────────────╮
-#                         │ Dataclasses and NamedTuples │
-#                         ╰─────────────────────────────╯
+# ╭──────────────────────────────────────────────────────────╮
+# │                        DataClass                         │
+# ╰──────────────────────────────────────────────────────────╯
 
 
 @dataclass
@@ -101,8 +101,8 @@ class Hyperparameter:
         return cls(
             lr=random.uniform(0.001, 1),
             momentum=random.uniform(0.001, 1),
-            weight_decay=random.uniform(1e-6, 1e-3),
-            dampening=random.uniform(1e-6, 1e-3),
+            weight_decay=random.uniform(1e-7, 1e-4),
+            dampening=random.uniform(1e-7, 1e-4),
             batch_size=512,
             model_type=ModelType.RESNET_18,
         )
@@ -110,7 +110,7 @@ class Hyperparameter:
 
 @dataclass
 class Fitness:
-    accuracy: float
+    fitness: float
     hyperparameter: Hyperparameter
 
 
@@ -128,12 +128,13 @@ class NaturalGradients:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class Distribution:
     mean: NDArray[np.floating]
     sigma: float
     b_matrix: NDArray[np.floating]
     random_generator: Generator
+    fitnesses: deque[Fitness]
 
     @staticmethod
     def fitness_shaping(fitnesses: list[Fitness]) -> list:
@@ -171,8 +172,8 @@ class Distribution:
                     size=2,
                 ),
                 random_generator.uniform(
+                    1e-7,
                     1e-6,
-                    1e-3,
                     size=2,
                 ),
             ],
@@ -186,12 +187,14 @@ class Distribution:
         mean = np.array(init_hyper)
         sigma = abs(np.linalg.det(square_root_of_covariance)) ** (1 / len(init_hyper))
         b_matrix = square_root_of_covariance / sigma
+        population_size = 4 + int(3 * np.log(len(mean)))
 
         return cls(
             mean=mean,
             sigma=sigma,
             b_matrix=b_matrix,
             random_generator=random_generator,
+            fitnesses=deque(maxlen=population_size),
         )
 
     def get_new_hyper(self) -> Hyperparameter:
@@ -211,9 +214,13 @@ class Distribution:
             model_type=ModelType.RESNET_18,
         )
 
-    def update_distribution(self, fitnesses: list[Fitness]) -> None:
-        gradients: NaturalGradients = self._compute_gradient(fitnesses=fitnesses)
+    def update_distribution(self, fitness: Fitness) -> None:
+        self.fitnesses.append(fitness)
         dimension = len(self.mean)
+        population_size = 4 + int(3 * np.log(dimension))
+        if len(self.fitnesses) < population_size:
+            return
+
         mean_stride = 1.0 / dimension
         b_matrix_stride = (
             (9 + 3 * np.log(dimension))
@@ -225,6 +232,8 @@ class Distribution:
             / (5 * dimension * np.sqrt(dimension))
             / dimension
         )
+
+        gradients: NaturalGradients = self._compute_gradient()
         self.mean = self.mean + (
             mean_stride * self.sigma * (self.b_matrix @ gradients.delta_gradient)
         )
@@ -248,18 +257,14 @@ class Distribution:
 
     def _compute_gradient(
         self,
-        fitnesses: list[Fitness],
     ) -> NaturalGradients:
         """
         Compute the natural gradient from the fitnesses.
 
-        Args:
-            fitnesses (list[Fitness]): List of Fitness objects.
-
         Returns:
             NaturalGradients: The computed natural gradients.
         """
-        sorted_fitnesses = sorted(fitnesses, key=lambda x: x.accuracy, reverse=True)
+        sorted_fitnesses = sorted(self.fitnesses, key=lambda x: x.fitness, reverse=True)
         utilities = Distribution.fitness_shaping(sorted_fitnesses)
         shaping_fitnesses = [
             (utility, fitness.hyperparameter)
