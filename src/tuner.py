@@ -15,7 +15,7 @@ from .worker import generate_all_workers
 
 def get_tuner_logger() -> logging.Logger:
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    log_dir = Path(Path.cwd()) / "logs" / timestamp
+    log_dir = Path.cwd() / "logs" / timestamp
     Path(log_dir).mkdir(parents=True, exist_ok=True)
 
     logger = logging.getLogger("Tuner")
@@ -71,7 +71,7 @@ class Tuner:
         self.trial_result: TrialResult = TrialResult()
 
         for trial in self.trial_states:
-            self.trial_result.record_trial_progress(trial)
+            self.trial_result.update_trial_result(trial)
 
     def run(self) -> None:
         self.logger.info("開始訓練")
@@ -86,16 +86,16 @@ class Tuner:
             self.trial_result.history_best[0],
             self.trial_result.history_best[1],
         )
+        self.trial_result.display_trial_result()
+
+    def get_chunk_size(self, iteration: int) -> int:
+        return self.trial_result.get_chunk_size(iteration)
 
     def get_quantile_trial(
         self,
         ratio: float = 0.25,
     ) -> tuple[list[TrialState], list[TrialState]]:
         return self.trial_result.get_quantile(ratio)
-
-    def record_trial_progress(self, trial_state: TrialState) -> None:
-        self.trial_result.record_trial_progress(trial_state)
-        self.trial_result.display_trial_progress()
 
     def mutation(self, trial_state: TrialState) -> TrialState:
         self.logger.info(
@@ -104,12 +104,10 @@ class Tuner:
             trial_state.hyperparameter,
         )
 
-        lower_quantile, upper_quantile = self.get_quantile_trial()
+        _, upper_quantile = self.get_quantile_trial()
 
         chose_trial = random.choice(upper_quantile)
-        hyperparameter = chose_trial.hyperparameter
-        hyperparameter.lr *= 0.8
-        hyperparameter.momentum *= 1.2
+        hyperparameter = chose_trial.hyperparameter.evolve()
 
         trial_state.hyperparameter = hyperparameter
         trial_state.checkpoint = chose_trial.checkpoint

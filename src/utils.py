@@ -85,6 +85,14 @@ class Hyperparameter:
             model_type=ModelType.RESNET_18,
         )
 
+    def evolve(self) -> "Hyperparameter":
+        return Hyperparameter(
+            self.lr * 0.8,
+            self.momentum * 1.2,
+            self.batch_size,
+            self.model_type,
+        )
+
 
 @dataclass
 class Checkpoint:
@@ -114,6 +122,7 @@ class ModelInitFunction(Protocol):
     def __call__(
         self,
         hyperparameter: Hyperparameter,
+        checkpoint: Checkpoint,
     ) -> tuple[nn.Module, optim.Optimizer]: ...
 
 

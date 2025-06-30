@@ -6,6 +6,7 @@ import torch
 from torch import nn, optim
 
 from .config import (
+    MUTATION_ITERATION,
     STOP_ACCURACY,
     STOP_ITERATION,
     TRIAL_PROGRESS_OUTPUT_PATH,
@@ -56,7 +57,7 @@ class TrialState:
                 raise ValueError(msg)
 
             self.model_init_fn: Callable[[], tuple[nn.Module, optim.Optimizer]] = (
-                lambda: model_init_fn(self.hyperparameter)
+                lambda: model_init_fn(self.hyperparameter, self.checkpoint)  # type: ignore[return-value]
             )
             model, optimizer = self.model_init_fn()
             self.checkpoint = Checkpoint({}, {})
@@ -98,6 +99,24 @@ class TrialState:
             raise ValueError(msg)
         self.chunk_size = chunk_size
 
+    def set_terminated(self) -> None:
+        self.status = TrialStatus.TERMINATE
+
+    def set_pause(self) -> None:
+        self.status = TrialStatus.PAUSE
+
+    def set_interrupted(self) -> None:
+        self.status = TrialStatus.INTERRUPTED
+
+    def set_running(self) -> None:
+        self.status = TrialStatus.RUNNING
+
+    def set_pending(self) -> None:
+        self.status = TrialStatus.PENDING
+
+    def set_need_mutation(self) -> None:
+        self.status = TrialStatus.NEED_MUTATION
+
 
 class TrialResult:
     def __init__(self) -> None:
@@ -123,6 +142,16 @@ class TrialResult:
                 trial_state.checkpoint,
             )
 
+    def get_chunk_size(self, iteration: int) -> int:
+        iterations = sorted(
+            [trial.iteration for trial in self.trial_progress.values()],
+            reverse=True,
+        )
+        length = (len(iterations) // 4) + 1
+        chunk_size = sum(iterations[:length]) // length - iteration
+        chunk_size = (iteration + MUTATION_ITERATION) // MUTATION_ITERATION
+        return max(chunk_size, 3)
+
     def get_history_best_result(
         self,
     ) -> tuple[float, Hyperparameter | None, Checkpoint | None]:
@@ -147,7 +176,7 @@ class TrialResult:
 
         return trials[:quantile_size], trials[-quantile_size:]
 
-    def display_trial_progress(
+    def display_trial_result(
         self,
         output_path: Path = TRIAL_PROGRESS_OUTPUT_PATH,
     ) -> None:
