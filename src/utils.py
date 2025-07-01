@@ -99,8 +99,8 @@ class Hyperparameter:
     @classmethod
     def random(cls) -> "Hyperparameter":
         return cls(
-            lr=random.uniform(0.001, 1),
-            momentum=random.uniform(0.001, 1),
+            lr=random.uniform(1e-4, 1e-1),
+            momentum=random.uniform(1e-4, 1e-1),
             weight_decay=random.uniform(1e-7, 1e-4),
             dampening=random.uniform(1e-7, 1e-4),
             batch_size=512,
@@ -167,8 +167,8 @@ class Distribution:
         init_hyper = np.concat(
             [
                 random_generator.uniform(
-                    0.001,
-                    1.0,
+                    1e-4,
+                    1e-1,
                     size=2,
                 ),
                 random_generator.uniform(

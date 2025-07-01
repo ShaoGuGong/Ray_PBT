@@ -1,4 +1,5 @@
 import random
+from itertools import repeat
 from pathlib import Path
 
 import numpy as np
@@ -40,15 +41,17 @@ class PBTTuner(Tuner):
         )
 
         _, upper_quantile = self._get_quantile_trial()
-
-        r = random.randint(1, 100)
         chose_trial = random.choice(upper_quantile)
         trial_state.checkpoint = chose_trial.checkpoint
+
+        r = random.randint(1, 100)
         if r <= 25:
             trial_state.hyperparameter = Hyperparameter.random()
         else:
             hyper = chose_trial.hyperparameter
-            perturbation = np.array([random.choice([0.8, 1.2, 1.0, 1.0])] * 4)
+            perturbation = np.array(
+                random.choice([0.8, 1.2, 1.0, 1.0]) for _ in repeat(None, 4)
+            )
             hyperparameter = hyper * perturbation
             trial_state.hyperparameter = Hyperparameter(
                 *hyperparameter,

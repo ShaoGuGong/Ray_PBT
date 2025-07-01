@@ -273,6 +273,7 @@ class Worker:
             ):
                 self.log("info", "訓練結束", trial_id=trial_state.id)
                 self.finish_trial(trial_state)
+                trial_state.previous_accuracy = trial_state.accuracy
                 trial_state.accuracy = self.test(model, test_loader)
                 trial_state.update_checkpoint(model, optimizer)
                 return trial_state
@@ -331,6 +332,7 @@ class Worker:
             if trial_state.iteration % self.mutation_iteration == 0:
                 break
 
+        trial_state.previous_accuracy = trial_state.accuracy
         trial_state.accuracy = self.test(model, test_loader)
 
         self.log(

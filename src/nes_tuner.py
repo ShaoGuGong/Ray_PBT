@@ -1,5 +1,5 @@
-import random
 from pathlib import Path
+from time import sleep
 
 import ray
 
@@ -41,35 +41,29 @@ class NESTuner(Tuner):
         with log_file.open("a") as f:
             f.write(f"Use NES Accuracy: {self.trial_result.history_best[0]:.6f}\n")
 
-    def _get_quantile_trial(
-        self,
-        ratio: float = 0.25,
-    ) -> tuple[list[TrialState], list[TrialState]]:
-        return self.trial_result.get_quantile(ratio)
-
     def should_mutate_trial(self, _: TrialState) -> bool:  # type: ignore[override]
+        sleep(4.0)
         return True
 
     def mutate_trial(self, trial_state: TrialState) -> TrialState:
-        fitness = Fitness(
-            fitness=trial_state.accuracy,
-            hyperparameter=trial_state.hyperparameter,
-        )
-
         self.logger.info(
             "Trial %d: 執行mutation, 原始超參數: %s",
             trial_state.id,
             trial_state.hyperparameter,
         )
 
+        accuracy_increment = (trial_state.accuracy - trial_state.previous_accuracy) / (
+            1.0 - trial_state.previous_accuracy
+        )
+        fitness = Fitness(
+            fitness=accuracy_increment,
+            hyperparameter=trial_state.hyperparameter,
+        )
         self.ditribution.update_distribution(fitness=fitness)
-
         new_hyper = self.ditribution.get_new_hyper()
         trial_state.hyperparameter = new_hyper
-        _, upper_quantile = self._get_quantile_trial()
-        if upper_quantile:
-            chose_trial = random.choice(upper_quantile)
-            trial_state.checkpoint = chose_trial.checkpoint
+
+        trial_state.checkpoint = self.trial_result.history_best[2]
 
         self.logger.info(
             "Trial-%d Iter-%d, 結束mutation, 新超參數: %s",

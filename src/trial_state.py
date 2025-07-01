@@ -44,6 +44,7 @@ class TrialState:
         self.device_iteration_count = {WorkerType.CPU: 0, WorkerType.GPU: 0}
         self.checkpoint: Checkpoint | None = None
         self.accuracy: float = 0.0
+        self.previous_accuracy: float = 0.0
         self.stop_accuracy: int = STOP_ACCURACY
         self.chunk_size: int = 1
 
@@ -84,6 +85,7 @@ class TrialState:
             without_checkpoint=True,
         )
         new_trial.accuracy = self.accuracy
+        new_trial.previous_accuracy = self.previous_accuracy
         new_trial.status = self.status
         new_trial.worker_id = self.worker_id
         new_trial.worker_type = self.worker_type
