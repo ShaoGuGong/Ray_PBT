@@ -2,7 +2,7 @@
 import argparse
 from collections.abc import Callable
 from datetime import datetime
-from itertools import islice
+from itertools import islice, repeat
 from pathlib import Path
 from time import perf_counter
 
@@ -90,6 +90,8 @@ def resnet18_init_fn(
     hyperparameter: Hyperparameter,
 ) -> tuple[nn.Module, optim.Optimizer]:
     model = models.resnet18(num_classes=10)
+    model.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+    model.maxpool = nn.Identity()  # type: ignore[assignment]
     optimizer = optim.SGD(
         model.parameters(),
         lr=hyperparameter.lr,
@@ -104,21 +106,11 @@ def generate_trial_states(
     n: int,
     random_fn: Callable | None = None,
 ) -> list[TrialState]:
-    if random_fn is None:
-        return [
-            TrialState(
-                i,
-                Hyperparameter.random(),
-                model_init_fn=resnet18_init_fn,
-                stop_iteration=STOP_ITERATION,
-            )
-            for i in range(n)
-        ]
-
+    fn = Hyperparameter.random if random_fn is None else random_fn
     return [
         TrialState(
             i,
-            random_fn(),
+            fn(),
             model_init_fn=resnet18_init_fn,
             stop_iteration=STOP_ITERATION,
         )
@@ -130,7 +122,6 @@ def train_step(
     model: nn.Module,
     optimizer: optim.Optimizer,
     train_loader: DataLoader,
-    batch_size: int,
     device: DeviceLikeType = torch.device("cpu"),
 ) -> None:
     model.train()
@@ -156,7 +147,7 @@ def hyperparameter_optimize(tuner_type: TunerType) -> None:
     match tuner_type:
         case TunerType.NES:
             distribution: Distribution = Distribution.get_random_ditribution()
-            trial_states = generate_trial_states(10, distribution.get_new_hyper)
+            trial_states = generate_trial_states(20, distribution.get_new_hyper)
             tuner = NESTuner.options(  # type: ignore[call-arg]
                 max_concurrency=5,
                 num_cpus=1,
@@ -168,7 +159,7 @@ def hyperparameter_optimize(tuner_type: TunerType) -> None:
                 distribution,
             )
         case TunerType.PBT:
-            trial_states = generate_trial_states(10)
+            trial_states = generate_trial_states(20)
             tuner = PBTTuner.options(  # type: ignore[call-arg]
                 max_concurrency=5,
                 num_cpus=1,
@@ -199,26 +190,35 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--tuner_type",
+        "-T",
         type=str,
         choices=["NES", "PBT", "COM"],
         default="COM",
         dest="tuner_type",
         help="Select the Tuner type of NES, PBT or COM(comparison PBT and NES)",
     )
+    parser.add_argument(
+        "--test_num",
+        "-N",
+        type=int,
+        default=1,
+        dest="test_num",
+        help="How many times to run the test",
+    )
     args = parser.parse_args()
-    tuner_type: TunerType | None = None
-    if args.tuner_type == "COM":
-        hyperparameter_optimize(tuner_type=TunerType.PBT)
-        hyperparameter_optimize(tuner_type=TunerType.NES)
-    elif args.tuner_type == "NES":
-        tuner_type = TunerType.NES
-        hyperparameter_optimize(tuner_type=tuner_type)
-    elif args.tuner_type == "PBT":
-        tuner_type = TunerType.PBT
-        hyperparameter_optimize(tuner_type=tuner_type)
-    else:
-        error_message = f"Unknown tuner type: {args.tuner_type}"
-        raise ValueError(error_message)
+
+    for _ in repeat(None, args.test_num):
+        match args.tuner_type:
+            case "COM":
+                hyperparameter_optimize(tuner_type=TunerType.PBT)
+                hyperparameter_optimize(tuner_type=TunerType.NES)
+            case "NES":
+                hyperparameter_optimize(tuner_type=TunerType.NES)
+            case "PBT":
+                hyperparameter_optimize(tuner_type=TunerType.PBT)
+            case _:
+                error_message = f"Unknown tuner type: {args.tuner_type}"
+                raise ValueError(error_message)
 
 
 if __name__ == "__main__":
