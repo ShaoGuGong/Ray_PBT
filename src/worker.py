@@ -1,5 +1,6 @@
 import logging
-from itertools import count, repeat
+import time
+from itertools import count
 from pathlib import Path
 
 import ray
@@ -180,11 +181,8 @@ class Worker:
 
         self.active_trials[trial_state.id] = trial_state
         self.trial_current_iteration[trial_state.id] = 0
-        trial_state.set_running()
         trial_state.worker_id = self.worker_state.id
         trial_state.worker_type = self.worker_state.worker_type
-
-        self.tuner.update_trial_result.remote(trial_state)
 
         self.log("info", f"Running Trials: {list(self.active_trials)}")
 
@@ -204,7 +202,7 @@ class Worker:
                 model, optimizer = trial_state.model_init_fn()
                 model.to(self.device)
 
-                for _ in repeat(None, trial_state.chunk_size):
+                for _ in range(trial_state.chunk_size):
                     self.train(trial_state, model, optimizer, train_loader, test_loader)
 
                     status = trial_state.status
@@ -220,7 +218,8 @@ class Worker:
                             break
 
                         case TrialStatus.RUNNING:
-                            self.tuner.update_trial_result.remote(trial_state)  # type: ignore[reportGeneralTypeIssues]
+                            self.log("info", "Update trial.", trial_id=trial_state.id)
+                            self.tuner.update_trial.remote(trial_state)  # type: ignore[reportGeneralTypeIssues]
 
                 if trial_state.status == TrialStatus.RUNNING:
                     trial_state.set_pause()
@@ -263,10 +262,13 @@ class Worker:
         Returns:
             TrialState: 訓練後的試驗狀態。
         """
-        for _ in repeat(
-            None,
+        for _ in range(
             self.mutation_iteration - trial_state.iteration % self.mutation_iteration,
         ):
+            if trial_state.iteration >= trial_state.stop_iteration:
+                trial_state.set_terminated()
+                break
+
             if self._check_and_handle_trial_condition(trial_state):
                 break
 
@@ -295,6 +297,8 @@ class Worker:
             trial_id=trial_state.id,
         )
 
+        # Note: time record
+        start = time.time()
         if (
             trial_state.iteration > trial_state.stop_iteration
             or trial_state.accuracy > trial_state.stop_accuracy
@@ -308,6 +312,8 @@ class Worker:
 
         if trial_state in lower_quantile:
             trial_state.set_need_mutation()
+        end = time.time()
+        self.log("info", f"Waiting time:{end - start:.2f} 秒", trial_id=trial_state.id)
 
         return trial_state
 
@@ -388,6 +394,9 @@ class Worker:
             self.logger.error(message, extra=extra)
             return
 
+    def get_id(self) -> int:
+        return self.worker_state.id
+
     def get_worker_type(self) -> WorkerType:
         """
         回傳 worker 類型 (CPU/GPU) 。
@@ -452,19 +461,6 @@ def generate_all_workers(
                 )
 
             if "GPU" in resource:
-                # for _ in range(int(resource["GPU"])):
-                #     worker_states.append(
-                #         WorkerState(
-                #             id=index,
-                #             num_cpus=0,
-                #             # num_gpus=resource.get("GPU", 0),
-                #             num_gpus=1,
-                #             node_name=f"node:{node_address}",
-                #             max_trials=7,
-                #             worker_type=WorkerType.GPU,
-                #         )
-                #     )
-                #     index += 1
                 worker_states.append(
                     WorkerState(
                         id=next(count_gen),

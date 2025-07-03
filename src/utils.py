@@ -85,7 +85,7 @@ class Hyperparameter:
             model_type=ModelType.RESNET_18,
         )
 
-    def evolve(self) -> "Hyperparameter":
+    def explore(self) -> "Hyperparameter":
         return Hyperparameter(
             self.lr * 0.8,
             self.momentum * 1.2,

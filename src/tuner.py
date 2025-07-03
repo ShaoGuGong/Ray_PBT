@@ -2,19 +2,19 @@ import logging
 import os
 import random
 import zipfile
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import ray
 
 from .trial_scheduler import TrialScheduler
-from .trial_state import TrialResult, TrialState
-from .utils import DataloaderFactory, TrainStepFunction, WorkerType
+from .trial_state import TrialManager, TrialState
+from .utils import DataloaderFactory, TrainStepFunction
 from .worker import generate_all_workers
 
 
 def get_tuner_logger() -> logging.Logger:
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    timestamp = (datetime.now(UTC) + timedelta(hours=8)).strftime("%Y-%m-%d_%H-%M-%S")
     log_dir = Path.cwd() / "logs" / timestamp
     Path(log_dir).mkdir(parents=True, exist_ok=True)
 
@@ -63,15 +63,12 @@ class Tuner:
             dataloader_factory=dataloader_factory,
         )
 
+        self.trial_manager = TrialManager(trial_states)
         self.scheduler: TrialScheduler = TrialScheduler(
-            ray.get_runtime_context().current_actor,
             self.workers,
-            trial_states,
+            self.trial_manager,
+            self.mutation,
         )
-        self.trial_result: TrialResult = TrialResult()
-
-        for trial in self.trial_states:
-            self.trial_result.update_trial_result(trial)
 
     def run(self) -> None:
         self.logger.info("開始訓練")
@@ -79,23 +76,17 @@ class Tuner:
         self.logger.info("結束訓練")
         self.scheduler.get_workers_logs()
 
-    def update_trial_result(self, trial_state: TrialState) -> None:
-        self.trial_result.update_trial_result(trial_state)
-        self.logger.info(
-            "History Best: %.6f %s",
-            self.trial_result.history_best[0],
-            self.trial_result.history_best[1],
-        )
-        self.trial_result.display_trial_result()
+    def update_trial(self, trial_state: TrialState) -> None:
+        self.trial_manager.update_trial(trial_state)
 
     def get_chunk_size(self, iteration: int) -> int:
-        return self.trial_result.get_chunk_size(iteration)
+        return self.trial_manager.get_chunk_size(iteration)
 
     def get_quantile_trial(
         self,
         ratio: float = 0.25,
     ) -> tuple[list[TrialState], list[TrialState]]:
-        return self.trial_result.get_quantile(ratio)
+        return self.trial_manager.get_quantile(ratio)
 
     def mutation(self, trial_state: TrialState) -> TrialState:
         self.logger.info(
@@ -107,7 +98,7 @@ class Tuner:
         _, upper_quantile = self.get_quantile_trial()
 
         chose_trial = random.choice(upper_quantile)
-        hyperparameter = chose_trial.hyperparameter.evolve()
+        hyperparameter = chose_trial.hyperparameter.explore()
 
         trial_state.hyperparameter = hyperparameter
         trial_state.checkpoint = chose_trial.checkpoint
@@ -120,18 +111,6 @@ class Tuner:
         )
 
         return trial_state
-
-    def get_min_iteration_trial(self) -> tuple[int, int]:
-        cpu_trial = [
-            trial
-            for trial in self.trial_result.trial_progress.values()
-            if trial.worker_type == WorkerType.CPU
-        ]
-        target = min(cpu_trial, key=lambda x: x.iteration)
-        return target.worker_id, target.id
-
-    def get_trial_progress(self) -> list[TrialState]:
-        return self.trial_result.get_trial_progress()
 
     def submit_trial(self, trial_state: TrialState) -> None:
         self.scheduler.submit_trial(trial_state)
@@ -157,5 +136,3 @@ class Tuner:
 
         with Path(zip_path).open("rb") as f:
             return f.read()
-
-        return None

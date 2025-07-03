@@ -164,7 +164,7 @@ if __name__ == "__main__":
     print("Start gen trial States")
     trial_states = generate_trial_states(50)
     tuner = Tuner.options(  # type: ignore[call-arg]
-        max_concurrency=5,
+        max_concurrency=13,
         num_cpus=1,
         resources={f"node:{get_head_node_address()}": 0.01},
     ).remote(trial_states, train_step, cifar10_data_loader_factory)
