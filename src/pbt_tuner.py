@@ -50,12 +50,12 @@ class PBTTuner(Tuner):
         else:
             hyper = chose_trial.hyperparameter
             perturbation = np.array(
-                random.choice([0.8, 1.2, 1.0, 1.0]) for _ in repeat(None, 4)
+                random.choice([0.8, 1.2, 1.0, 1.0]) for _ in repeat(None, 5)
             )
             hyperparameter = hyper * perturbation
             trial_state.hyperparameter = Hyperparameter(
-                *hyperparameter,
-                batch_size=512,
+                *hyperparameter[:-1],
+                batch_size=int(hyperparameter[-1]),
                 model_type=ModelType.RESNET_18,
             )
 

@@ -268,7 +268,6 @@ class TrialScheduler:
         Returns:
             List[ObjectRef]: 當前正在運行的訓練任務列表。
         """
-
         if not self.is_final_phase and (
             self.trial_state_nums - len(self.completed_trial_states)
         ) < (len(self.gpu_workers) + len(self.cpu_workers)):
@@ -353,7 +352,7 @@ class TrialScheduler:
         # while self.running_futures or self.pending_trial_states:
         while len(self.completed_trial_states) < self.trial_state_nums:
             self.assign_trial_to_worker()
-
+            time.sleep(10.0)
             if current_time := time.time() - update_phase_time > 60.0:
                 self.update_phase()
                 update_phase_time = current_time

@@ -8,7 +8,10 @@ if Path.exists(path):
     with Path(path).open("r") as f:
         config = json.load(f)
 
-DATASET_PATH = config.get("dataset_path", "~/Documents/dataset/")
+DATASET_PATH = config.get(
+    "dataset_path",
+    "~/Documents/workspace/tune_population_based/data",
+)
 STOP_ACCURACY = config.get("stop_accuracy", 0.9)
 STOP_ITERATION = config.get("stop_iteration", 1000)
 PHASE_ITERATION = config.get("phase_iteration", 250)
@@ -17,12 +20,12 @@ GPU_MAX_ITERATION = config.get("gpu_max_iteration", 150)
 TRIAL_RESULT_OUTPUT_PATH = Path(
     config.get(
         "trial_result_output_path",
-        "~/Documents/workspace/Ray_PBT/trial_result.output",
+        "~/Documents/Ray_PBT/trial_result.output",
     ),
 ).expanduser()
 TRIAL_PROGRESS_OUTPUT_PATH = Path(
     config.get(
         "trial_progress_output_path",
-        "~/Documents/workspace/Ray_PBT/trial_progress.output",
+        "~/Documents/Ray_PBT/trial_progress.output",
     ),
 ).expanduser()

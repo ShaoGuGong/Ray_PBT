@@ -94,7 +94,15 @@ class Hyperparameter:
         )
 
     def to_ndarray(self) -> NDArray[np.floating]:
-        return np.array([self.lr, self.momentum, self.weight_decay, self.dampening])
+        return np.array(
+            [
+                self.lr,
+                self.momentum,
+                self.weight_decay,
+                self.dampening,
+                (self.batch_size - 32) / 224.0,
+            ],
+        )
 
     @classmethod
     def random(cls) -> "Hyperparameter":
@@ -103,7 +111,7 @@ class Hyperparameter:
             momentum=random.uniform(1e-4, 1e-1),
             weight_decay=random.uniform(1e-7, 1e-4),
             dampening=random.uniform(1e-7, 1e-4),
-            batch_size=512,
+            batch_size=int(random.uniform(0.0, 1.0) * 224.0 + 32),
             model_type=ModelType.RESNET_18,
         )
 
@@ -176,6 +184,11 @@ class Distribution:
                     1e-6,
                     size=2,
                 ),
+                random_generator.uniform(
+                    0.0,
+                    1.0,
+                    size=1,
+                ),
             ],
         )
 
@@ -209,8 +222,8 @@ class Distribution:
             modified_sample = self.mean + self.sigma * (self.b_matrix @ sample)
         parameter: list[float] = modified_sample.tolist()
         return Hyperparameter(
-            *parameter,
-            batch_size=512,
+            *parameter[:-1],
+            batch_size=int(parameter[-1] * 224.0 + 32),
             model_type=ModelType.RESNET_18,
         )
 

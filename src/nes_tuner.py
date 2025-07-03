@@ -1,5 +1,4 @@
 from pathlib import Path
-from time import sleep
 
 import ray
 
@@ -42,7 +41,6 @@ class NESTuner(Tuner):
             f.write(f"Use NES Accuracy: {self.trial_result.history_best[0]:.6f}\n")
 
     def should_mutate_trial(self, _: TrialState) -> bool:  # type: ignore[override]
-        sleep(6.0)
         return True
 
     def mutate_trial(self, trial_state: TrialState) -> TrialState:

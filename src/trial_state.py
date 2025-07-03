@@ -102,6 +102,11 @@ class TrialState:
 
 
 class TrialResult:
+    __slots__ = {
+        "history_best",
+        "trial_progress",
+    }
+
     def __init__(self) -> None:
         self.history_best: tuple[
             float,

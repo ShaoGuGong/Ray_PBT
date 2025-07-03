@@ -1,7 +1,7 @@
 #! /usr/bin/env python3
 import argparse
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from itertools import islice, repeat
 from pathlib import Path
 from time import perf_counter
@@ -136,7 +136,7 @@ def train_step(
         optimizer.step()
 
 
-def hyperparameter_optimize(tuner_type: TunerType) -> None:
+def hyperparameter_optimize(tuner_type: TunerType, trial_num: int) -> None:
     start = perf_counter()
     ray.init(
         runtime_env={
@@ -147,7 +147,7 @@ def hyperparameter_optimize(tuner_type: TunerType) -> None:
     match tuner_type:
         case TunerType.NES:
             distribution: Distribution = Distribution.get_random_ditribution()
-            trial_states = generate_trial_states(20, distribution.get_new_hyper)
+            trial_states = generate_trial_states(trial_num, distribution.get_new_hyper)
             tuner = NESTuner.options(  # type: ignore[call-arg]
                 max_concurrency=5,
                 num_cpus=1,
@@ -159,7 +159,7 @@ def hyperparameter_optimize(tuner_type: TunerType) -> None:
                 distribution,
             )
         case TunerType.PBT:
-            trial_states = generate_trial_states(20)
+            trial_states = generate_trial_states(trial_num)
             tuner = PBTTuner.options(  # type: ignore[call-arg]
                 max_concurrency=5,
                 num_cpus=1,
@@ -170,7 +170,9 @@ def hyperparameter_optimize(tuner_type: TunerType) -> None:
 
     zip_logs_bytes: bytes = ray.get(tuner.get_zipped_log.remote())  # type: ignore[call-arg]
 
-    zip_output_dir = f"./logs/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}/"
+    zip_output_dir = f"./logs/{
+        (datetime.now(UTC) + timedelta(hours=8)).strftime('%Y-%m-%d_%H-%M-%S')
+    }/"
     Path(zip_output_dir).mkdir(parents=True, exist_ok=True)
     zip_output_path = Path(zip_output_dir) / "logs.zip"
     with Path(zip_output_path).open("wb") as f:
@@ -179,6 +181,7 @@ def hyperparameter_optimize(tuner_type: TunerType) -> None:
     unzip_file(zip_output_path, zip_output_dir)  # type: ignore[call-arg]
 
     ray.shutdown()
+
     log_dir = Path("~/Documents/workspace/shaogu/Ray_PBT/log").expanduser()
     log_dir.mkdir(exist_ok=True)
     log_file = log_dir / "time.log"
@@ -205,17 +208,37 @@ def main() -> None:
         dest="test_num",
         help="How many times to run the test",
     )
+    parser.add_argument(
+        "--trial_num",
+        "-R",
+        type=int,
+        default=5,
+        dest="trial_num",
+        help="Number of trails to run for each tuner type",
+    )
     args = parser.parse_args()
 
     for _ in repeat(None, args.test_num):
         match args.tuner_type:
             case "COM":
-                hyperparameter_optimize(tuner_type=TunerType.PBT)
-                hyperparameter_optimize(tuner_type=TunerType.NES)
+                hyperparameter_optimize(
+                    tuner_type=TunerType.PBT,
+                    trial_num=args.trial_num,
+                )
+                hyperparameter_optimize(
+                    tuner_type=TunerType.NES,
+                    trial_num=args.trial_num,
+                )
             case "NES":
-                hyperparameter_optimize(tuner_type=TunerType.NES)
+                hyperparameter_optimize(
+                    tuner_type=TunerType.NES,
+                    trial_num=args.trial_num,
+                )
             case "PBT":
-                hyperparameter_optimize(tuner_type=TunerType.PBT)
+                hyperparameter_optimize(
+                    tuner_type=TunerType.PBT,
+                    trial_num=args.trial_num,
+                )
             case _:
                 error_message = f"Unknown tuner type: {args.tuner_type}"
                 raise ValueError(error_message)
