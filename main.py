@@ -101,12 +101,14 @@ def cifar10_data_loader_factory(
 def resnet18_init_fn(
     hyperparameter: Hyperparameter,
     checkpoint: Checkpoint,
+    device: torch.device,
 ) -> tuple[nn.Module, optim.Optimizer]:
     model = models.resnet18()
     model.fc = nn.Linear(model.fc.in_features, 10)
 
     if checkpoint:
         model.load_state_dict(checkpoint.model_state_dict)
+    model = model.to(device)
 
     optimizer = optim.SGD(
         model.parameters(),
@@ -120,6 +122,7 @@ def resnet18_init_fn(
     for param_group in optimizer.param_groups:
         param_group["lr"] = hyperparameter.lr
         param_group["momentum"] = hyperparameter.momentum
+
     return model, optimizer
 
 
@@ -158,10 +161,17 @@ if __name__ == "__main__":
     ray.init(
         runtime_env={
             "working_dir": ".",
-            "excludes": [".git", "test", "logs/*", "LICENSE", "README.md", ".venv"],
+            "excludes": [
+                ".git",
+                "test",
+                "logs/*",
+                "LICENSE",
+                "README.md",
+                ".venv",
+                ".ruff_cache",
+            ],
         },
     )
-    print("Start gen trial States")
     trial_states = generate_trial_states(50)
     tuner = Tuner.options(  # type: ignore[call-arg]
         max_concurrency=13,

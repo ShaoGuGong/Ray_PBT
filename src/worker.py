@@ -1,4 +1,5 @@
 import logging
+import random
 import time
 from itertools import count
 from pathlib import Path
@@ -135,7 +136,7 @@ class Worker:
         self.trial_phase: TrialPhase = trial_phase
         self.dataloader_factory: DataloaderFactory = dataloader_factory
         self.is_stop: bool = False
-        self.trial_current_iteration: dict[int, int] = {}
+        self.trial_iteration_count: dict[int, int] = {}
         self.log("info", "初始化完成")
 
     def get_active_trials_nums(self) -> int:
@@ -180,10 +181,9 @@ class Worker:
             return
 
         self.active_trials[trial_state.id] = trial_state
-        self.trial_current_iteration[trial_state.id] = 0
+        self.trial_iteration_count[trial_state.id] = 0
         trial_state.worker_id = self.worker_state.id
         trial_state.worker_type = self.worker_state.worker_type
-
         self.log("info", f"Running Trials: {list(self.active_trials)}")
 
     def run(self) -> None:
@@ -196,14 +196,15 @@ class Worker:
                 )
                 self.log("debug", f"{torch.cuda.is_available()=}")
 
-                hyper = trial_state.hyperparameter
-                train_loader, test_loader, _ = self.dataloader_factory(hyper.batch_size)
+                if self.trial_iteration_count[trial_state.id] < trial_state.chunk_size:
+                    hyper = trial_state.hyperparameter
+                    train_loader, test_loader, _ = self.dataloader_factory(
+                        hyper.batch_size,
+                    )
 
-                model, optimizer = trial_state.model_init_fn()
-                model.to(self.device)
-
-                for _ in range(trial_state.chunk_size):
+                    model, optimizer = trial_state.model_init_fn(self.device)
                     self.train(trial_state, model, optimizer, train_loader, test_loader)
+                    trial_state.update_checkpoint(model, optimizer)
 
                     status = trial_state.status
                     match status:
@@ -218,10 +219,10 @@ class Worker:
                             break
 
                         case TrialStatus.RUNNING:
-                            self.log("info", "Update trial.", trial_id=trial_state.id)
                             self.tuner.update_trial.remote(trial_state)  # type: ignore[reportGeneralTypeIssues]
 
-                if trial_state.status == TrialStatus.RUNNING:
+                    self.trial_iteration_count[trial_state.id] += 1
+                else:
                     trial_state.set_pause()
                     self.tuner.submit_trial.remote(trial_state)
                     self.active_trials.pop(trial_state.id)
@@ -281,7 +282,6 @@ class Worker:
             )
 
             trial_state.iteration += 1
-            self.trial_current_iteration[trial_state.id] += 1
             trial_state.phase = self.trial_phase.get_trial_phase(trial_state)
             trial_state.device_iteration_count[self.worker_state.worker_type] += 1
 
@@ -297,8 +297,6 @@ class Worker:
             trial_id=trial_state.id,
         )
 
-        # Note: time record
-        start = time.time()
         if (
             trial_state.iteration > trial_state.stop_iteration
             or trial_state.accuracy > trial_state.stop_accuracy
@@ -308,12 +306,16 @@ class Worker:
         if trial_state.status != TrialStatus.RUNNING:
             return trial_state
 
-        lower_quantile, _ = ray.get(self.tuner.get_quantile_trial.remote())  # type: ignore[reportGeneralTypeIssues]
+        baseline = ray.get(self.tuner.get_mutation_baseline.remote())  # type: ignore[reportGeneralTypeIssues]
+        self.log(
+            "info",
+            f"Baseline: {baseline}, Accuracy: {trial_state.accuracy}",
+            trial_id=trial_state.id,
+        )
 
-        if trial_state in lower_quantile:
+        mutation_ratio = 0.25
+        if trial_state.accuracy <= baseline and random.random() >= mutation_ratio:
             trial_state.set_need_mutation()
-        end = time.time()
-        self.log("info", f"Waiting time:{end - start:.2f} 秒", trial_id=trial_state.id)
 
         return trial_state
 
@@ -467,7 +469,7 @@ def generate_all_workers(
                         num_cpus=0,
                         num_gpus=resource["GPU"],
                         node_name=f"node:{node_address}",
-                        max_trials=1,
+                        max_trials=3,
                         worker_type=WorkerType.GPU,
                     ),
                 )

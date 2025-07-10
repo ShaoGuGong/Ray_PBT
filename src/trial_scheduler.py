@@ -39,6 +39,7 @@ def cpu_scheduling(
     worker_id, worker = next(iter(available_cpu_workers))
     trial_state.worker_id = worker_id
     trial_state.worker_type = WorkerType.CPU
+    trial_state.set_running()
     ray.get(worker.assign_trial.remote(trial_state))  # type: ignore[reportGeneralTypeIssues]
 
     return True
@@ -68,6 +69,7 @@ def gpu_scheduling(
     worker_id, worker = max(available_gpu_workers, key=lambda x: x[1])[0]
     trial_state.worker_id = worker_id
     trial_state.worker_type = WorkerType.GPU
+    trial_state.set_running()
     ray.get(worker.assign_trial.remote(trial_state))  # type: ignore[reportGeneralTypeIssues]
     return True
 
@@ -175,7 +177,8 @@ class TrialScheduler:
             for worker in self.workers
             if ray.get(worker.get_worker_type.remote()) == WorkerType.GPU  # type: ignore[reportGeneralTypeIssues]
         ]
-        self.gpu_workers = dict(
+
+        self.gpu_workers: dict[int, ActorHandle] = dict(
             zip(
                 ray.get([worker.get_id.remote() for worker in gpu_workers]),  # type:ignore[reportGeneralTypeIssues]
                 gpu_workers,
@@ -188,7 +191,8 @@ class TrialScheduler:
             for worker in self.workers
             if ray.get(worker.get_worker_type.remote()) == WorkerType.CPU  # type:ignore[reportGeneralTypeIssues]
         ]
-        self.cpu_workers = dict(
+
+        self.cpu_workers: dict[int, ActorHandle] = dict(
             zip(
                 ray.get([worker.get_id.remote() for worker in cpu_workers]),  # type:ignore[reportGeneralTypeIssues]
                 cpu_workers,
@@ -207,15 +211,21 @@ class TrialScheduler:
         Returns:
             List[ObjectRef]: 當前正在運行的訓練任務列表。
         """
-        # CPU Scheduling
-        trial_state = self.trial_manager.get_most_iterated_pending_trial()
-        if trial_state is None:
-            return
+        if self.trial_manager.get_uncompleted_trial_num() < len(self.gpu_workers) * 3:
+            gpu_stealing_strategy(list(self.cpu_workers.values()), logger=self.logger)
 
-        trial_state.set_chunk_size(3)
-        if cpu_scheduling(trial_state, self.cpu_workers):
-            self.trial_manager.run_trial(trial_state.id)
-            self.trial_manager.update_trial(trial_state)
+        else:
+            # CPU Scheduling
+            trial_state = self.trial_manager.get_kth_largest_iteration_trial(
+                len(self.cpu_workers),
+            )
+            if trial_state is None:
+                return
+
+            trial_state.set_chunk_size(3)
+            if cpu_scheduling(trial_state, self.cpu_workers):
+                self.trial_manager.run_trial(trial_state.id)
+                self.trial_manager.update_trial(trial_state)
 
         # GPU Scheduling
         trial_state = self.trial_manager.get_least_iterated_pending_trial()
@@ -234,10 +244,11 @@ class TrialScheduler:
 
         match status:
             case TrialStatus.INTERRUPTED:
+                trial_state.set_pending()
                 self.trial_manager.pend_trial(trial_state.id)
                 self.trial_manager.update_trial(trial_state)
                 self.logger.info(
-                    "🔃 Worker %d 回傳已中斷 Trial %d",
+                    "🔃 Worker %2d 回傳已中斷 Trial %2d",
                     trial_state.worker_id,
                     trial_state.id,
                 )
@@ -247,7 +258,7 @@ class TrialScheduler:
                 self.trial_manager.update_trial(trial_state)
                 self.trial_manager.pend_trial(trial_state.id)
                 self.logger.info(
-                    "🔃 Worker %d 回傳未完成 Trial %d, Iteration: %d, Accuracy: %.2f",
+                    "🔃 Worker %2d 回傳未完成 Trial %2d, Iteration: %d, Accuracy: %.2f",
                     trial_state.worker_id,
                     trial_state.id,
                     trial_state.iteration,
@@ -255,6 +266,7 @@ class TrialScheduler:
                 )
 
             case TrialStatus.NEED_MUTATION:
+                trial_state.set_pending()
                 trial_state = self.mutation_fn(trial_state)  # type: ignore[reportGeneralTypeIssues]
                 if trial_state.checkpoint is None:
                     self.logger.debug("Trial %d checkpoint is None", trial_state.id)
@@ -262,15 +274,16 @@ class TrialScheduler:
                 self.trial_manager.update_trial(trial_state)
 
             case TrialStatus.TERMINATE:
+                trial_state.set_terminated()
                 self.trial_manager.complete_trial(trial_state.id)
                 self.trial_manager.update_trial(trial_state)
-
                 self.logger.info(
-                    "✅ Worker %d Trial %d 完成, Accuracy: %.2f",
+                    "✅ Worker %2d Trial %2d 完成, Accuracy: %.2f",
                     trial_state.worker_id,
                     trial_state.id,
                     trial_state.accuracy,
                 )
+
                 self.logger.info(
                     "✅ 已完成的訓練任務列表: %s",
                     self.trial_manager.completed,
@@ -279,7 +292,7 @@ class TrialScheduler:
             case TrialStatus.FAILED:
                 self.trial_manager.complete_trial(trial_state.id)
                 self.logger.warning(
-                    "Worker %d Trial %d  發生錯誤, 已中止訓練",
+                    "Worker %2d Trial %2d  發生錯誤, 已中止訓練",
                     trial_state.worker_id,
                     trial_state.id,
                 )
@@ -294,13 +307,19 @@ class TrialScheduler:
         該方法會持續運行直到所有的試驗都完成。
         """
         self.logger.info("訓練開始")
-        update_phase_time = time.time()
         update_assign_time = time.time()
         # while self.running_futures or self.pending_trial_states:
         while not self.trial_manager.is_finish():
             if (current_time := time.time()) - update_assign_time > 1.0:
                 update_assign_time = current_time
+                self.trial_manager.maybe_update_mutation_baseline()
                 self.assign_trial_to_worker()
+                if self.trial_manager.history_best:
+                    self.logger.info(
+                        "History best accuracy: %.2f ,%s",
+                        self.trial_manager.history_best.accuracy,
+                        str(self.trial_manager.history_best.hyperparameter),
+                    )
 
         self.print_iteration_count()
         self.logger.info("🎉 所有 Trial 訓練完成!")
@@ -323,7 +342,6 @@ class TrialScheduler:
                     40,
                 ),
             )
-
         print(
             "Total    CPU/GPU",
             colored_progress_bar(

@@ -1,6 +1,7 @@
 import logging
 import os
 import random
+import time
 import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -71,22 +72,22 @@ class Tuner:
         )
 
     def run(self) -> None:
+        start = time.time()
         self.logger.info("開始訓練")
         self.scheduler.run()
         self.logger.info("結束訓練")
+        end = time.time()
+        self.logger.info("訓練總時長: %.2f 秒", end - start)
         self.scheduler.get_workers_logs()
 
     def update_trial(self, trial_state: TrialState) -> None:
         self.trial_manager.update_trial(trial_state)
 
+    def get_mutation_baseline(self) -> float:
+        return self.trial_manager.get_cached_mutation_baseline()
+
     def get_chunk_size(self, iteration: int) -> int:
         return self.trial_manager.get_chunk_size(iteration)
-
-    def get_quantile_trial(
-        self,
-        ratio: float = 0.25,
-    ) -> tuple[list[TrialState], list[TrialState]]:
-        return self.trial_manager.get_quantile(ratio)
 
     def mutation(self, trial_state: TrialState) -> TrialState:
         self.logger.info(
@@ -95,7 +96,7 @@ class Tuner:
             trial_state.hyperparameter,
         )
 
-        _, upper_quantile = self.get_quantile_trial()
+        upper_quantile = self.trial_manager.get_upper_quantile_trials()
 
         chose_trial = random.choice(upper_quantile)
         hyperparameter = chose_trial.hyperparameter.explore()

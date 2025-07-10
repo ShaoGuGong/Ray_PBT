@@ -1,10 +1,11 @@
 import heapq
 import math
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
-from torch import nn, optim
+from torch import device, nn, optim
 
 from .config import (
     MUTATION_ITERATION,
@@ -57,10 +58,13 @@ class TrialState:
                 )
                 raise ValueError(msg)
 
-            self.model_init_fn: Callable[[], tuple[nn.Module, optim.Optimizer]] = (
-                lambda: model_init_fn(self.hyperparameter, self.checkpoint)  # type: ignore[return-value]
+            self.model_init_fn: Callable[
+                [device],
+                tuple[nn.Module, optim.Optimizer],
+            ] = (
+                lambda d: model_init_fn(self.hyperparameter, self.checkpoint, d)  # type: ignore[return-value]
             )
-            model, optimizer = self.model_init_fn()
+            model, optimizer = self.model_init_fn(device("cpu"))
             self.checkpoint = Checkpoint({}, {})
             self.update_checkpoint(model, optimizer)
 
@@ -127,6 +131,9 @@ class TrialManager:
         self.completed = set()
         self.history_best: TrialState | None = None
 
+        self._latest_update_mutation_baseline_ts: float = 0.0
+        self._mutation_baseline: float = 0.0
+
     def add_trial(self, trial_state: TrialState) -> None:
         self.all_trials[trial_state.id] = trial_state
 
@@ -137,7 +144,6 @@ class TrialManager:
             raise ValueError(msg)
 
         self.pending.discard(trial_id)
-        trial.set_running()
         self.running.add(trial_id)
 
     def pend_trial(self, trial_id: int) -> None:
@@ -147,7 +153,6 @@ class TrialManager:
             raise ValueError(msg)
 
         self.running.discard(trial_id)
-        trial.set_terminated()
         self.pending.add(trial_id)
 
     def complete_trial(self, trial_id: int) -> None:
@@ -157,7 +162,6 @@ class TrialManager:
             raise ValueError(msg)
 
         self.running.discard(trial_id)
-        trial.set_terminated()
         self.completed.add(trial_id)
 
     def get_least_iterated_pending_trial(self) -> TrialState | None:
@@ -193,23 +197,57 @@ class TrialManager:
     def get_history_best_result(self) -> TrialState | None:
         return self.history_best
 
-    def get_quantile(
+    def get_kth_largest_iteration_trial(self, k: int) -> TrialState | None:
+        result = heapq.nlargest(
+            k,
+            [trial for trial in self.all_trials.values() if trial.id in self.pending],
+            key=lambda t: t.iteration,
+        )
+
+        if not result:
+            return None
+        return result[-1]
+
+    def get_mutation_baseline(
         self,
         ratio: float = 0.25,
-    ) -> tuple[list[TrialState], list[TrialState]]:
-        trials = [trial for trial in self.all_trials.values() if trial.accuracy != 0]
-        quantile_size = math.ceil(len(trials) * ratio)
+    ) -> float:
+        accuracy = [
+            trial.accuracy for trial in self.all_trials.values() if trial.accuracy > 0
+        ]
+        quantile_size = math.ceil(len(self.all_trials) * ratio)
 
-        min_trials = 2
-        if len(trials) < min_trials:
-            return [], []
+        result = heapq.nsmallest(
+            quantile_size,
+            accuracy,
+        )
 
-        quantile_size = min(math.ceil(len(trials) * ratio), len(trials) // 2)
+        if len(result) < quantile_size:
+            return 0.0
 
-        bottom_k = heapq.nsmallest(quantile_size, trials, key=lambda x: x.accuracy)
-        top_k = heapq.nlargest(quantile_size, trials, key=lambda x: x.accuracy)
+        return result[-1]
 
-        return bottom_k, top_k
+    def get_cached_mutation_baseline(self) -> float:
+        return self._mutation_baseline
+
+    def get_uncompleted_trial_num(self) -> int:
+        return len(self.all_trials) - len(self.completed)
+
+    def get_upper_quantile_trials(self, ratio: float = 0.25) -> list[TrialState]:
+        trials = [trial for trial in self.all_trials.values() if trial.accuracy > 0]
+        quantile_size = math.ceil(len(self.all_trials) * ratio)
+        return heapq.nlargest(
+            quantile_size,
+            trials,
+            key=lambda t: t.accuracy,
+        )
+
+    def maybe_update_mutation_baseline(self) -> None:
+        now = time.time()
+        iterval_time = 5
+        if now - self._latest_update_mutation_baseline_ts > iterval_time:
+            self._latest_update_mutation_baseline_ts = now
+            self._mutation_baseline = self.get_mutation_baseline()
 
     def update_trial(self, trial_state: TrialState) -> None:
         if trial_state.id not in self.all_trials:

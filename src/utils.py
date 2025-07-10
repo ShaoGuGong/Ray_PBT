@@ -7,7 +7,7 @@ from functools import reduce
 from typing import Any, Protocol, TypeVar
 
 import ray
-from torch import nn, optim
+from torch import device, nn, optim
 from torch.utils.data import DataLoader
 
 # ╭──────────────────────────────────────────────────────────╮
@@ -72,7 +72,7 @@ class Hyperparameter:
 
     def __str__(self) -> str:
         return (
-            f"Hyperparameter(lr:{self.lr:.3f}, momentum:{self.momentum:.3f} "
+            f"Hyperparameter(lr:{self.lr:.3f}, momentum:{self.momentum:.3f}, "
             f"batch_size:{self.batch_size:4d}, model_type:{self.model_type})"
         )
 
@@ -123,6 +123,7 @@ class ModelInitFunction(Protocol):
         self,
         hyperparameter: Hyperparameter,
         checkpoint: Checkpoint,
+        device: device,
     ) -> tuple[nn.Module, optim.Optimizer]: ...
 
 
