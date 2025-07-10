@@ -17,6 +17,7 @@ from src.utils import Checkpoint, Hyperparameter, get_head_node_address, unzip_f
 
 def cifar10_data_loader_factory(
     batch_size: int = 64,
+    num_workers: int = 0,
 ) -> tuple[DataLoader, DataLoader, DataLoader]:
     data_dir = Path(DATASET_PATH).expanduser()
     if not Path(data_dir).exists():
@@ -75,11 +76,13 @@ def cifar10_data_loader_factory(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
+        num_workers=num_workers,
     )
     valid_loader = DataLoader(
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
+        num_workers=num_workers,
     )
 
     # valid_loader = DataLoader(

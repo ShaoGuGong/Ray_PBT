@@ -1,6 +1,5 @@
 import logging
 import random
-import time
 from itertools import count
 from pathlib import Path
 
@@ -12,10 +11,7 @@ from torch.utils.data import DataLoader
 
 from .config import (
     MUTATION_ITERATION,
-    PHASE_ITERATION,
-    STOP_ITERATION,
 )
-from .trial_phase import TrialPhase
 from .trial_state import TrialState
 from .utils import (
     Accuracy,
@@ -114,7 +110,6 @@ class Worker:
         worker_state: WorkerState,
         train_step: TrainStepFunction,
         tuner: ActorHandle,
-        trial_phase: TrialPhase,
         dataloader_factory: DataloaderFactory,
     ) -> None:
         """
@@ -133,11 +128,13 @@ class Worker:
         self.tuner: ActorHandle = tuner
         self.mutation_iteration: int = MUTATION_ITERATION
         self.interrupt_set: set = set()
-        self.trial_phase: TrialPhase = trial_phase
         self.dataloader_factory: DataloaderFactory = dataloader_factory
         self.is_stop: bool = False
         self.trial_iteration_count: dict[int, int] = {}
         self.log("info", "初始化完成")
+
+        if self.worker_state.worker_type == WorkerType.CPU:
+            torch.set_num_threads(int(self.worker_state.num_cpus))
 
     def get_active_trials_nums(self) -> int:
         """
@@ -188,57 +185,53 @@ class Worker:
 
     def run(self) -> None:
         while not self.is_stop:
-            for trial_state in self.get_active_trials():
-                self.log(
-                    "info",
-                    f"開始訓練, chunk_size: {trial_state.chunk_size}",
-                    trial_id=trial_state.id,
-                )
-                self.log("debug", f"{torch.cuda.is_available()=}")
+            trial_state = min(
+                self.get_active_trials(),
+                key=lambda x: x.iteration,
+                default=None,
+            )
+            if trial_state is None:
+                continue
 
-                if self.trial_iteration_count[trial_state.id] < trial_state.chunk_size:
-                    hyper = trial_state.hyperparameter
-                    train_loader, test_loader, _ = self.dataloader_factory(
-                        hyper.batch_size,
-                    )
+            self.log(
+                "info",
+                f"開始訓練, chunk_size: {trial_state.chunk_size}",
+                trial_id=trial_state.id,
+            )
+            self.log("debug", f"{torch.cuda.is_available()=}")
 
-                    model, optimizer = trial_state.model_init_fn(self.device)
-                    self.train(trial_state, model, optimizer, train_loader, test_loader)
-                    trial_state.update_checkpoint(model, optimizer)
+            hyper = trial_state.hyperparameter
+            train_loader, test_loader, _ = self.dataloader_factory(
+                hyper.batch_size,
+                num_workers=int(self.worker_state.num_cpus),
+            )
+            model, optimizer = trial_state.model_init_fn(self.device)
 
-                    status = trial_state.status
-                    match status:
-                        case (
-                            TrialStatus.TERMINATE
-                            | TrialStatus.PAUSE
-                            | TrialStatus.NEED_MUTATION
-                            | TrialStatus.INTERRUPTED
-                        ):
-                            self.tuner.submit_trial.remote(trial_state)  # type: ignore[reportGeneralTypeIssues]
-                            self.active_trials.pop(trial_state.id)
-                            break
+            for _ in range(trial_state.chunk_size):
+                self.train(trial_state, model, optimizer, train_loader, test_loader)
 
-                        case TrialStatus.RUNNING:
-                            self.tuner.update_trial.remote(trial_state)  # type: ignore[reportGeneralTypeIssues]
+                match trial_state.status:
+                    case (
+                        TrialStatus.TERMINATE
+                        | TrialStatus.PAUSE
+                        | TrialStatus.NEED_MUTATION
+                        | TrialStatus.INTERRUPTED
+                    ):
+                        trial_state.update_checkpoint(model, optimizer)
+                        self.tuner.submit_trial.remote(trial_state)  # type: ignore[reportGeneralTypeIssues]
+                        self.active_trials.pop(trial_state.id)
+                        break
 
-                    self.trial_iteration_count[trial_state.id] += 1
-                else:
-                    trial_state.set_pause()
-                    self.tuner.submit_trial.remote(trial_state)
-                    self.active_trials.pop(trial_state.id)
+                    case TrialStatus.RUNNING:
+                        self.tuner.update_trial.remote(trial_state)  # type: ignore[reportGeneralTypeIssues]
+
+            if trial_state.status == TrialStatus.RUNNING:
+                trial_state.set_pause()
+                trial_state.update_checkpoint(model, optimizer)
+                self.tuner.submit_trial.remote(trial_state)
+                self.active_trials.pop(trial_state.id)
 
     def _check_and_handle_trial_condition(self, trial_state: TrialState) -> bool:
-        if self.trial_phase.is_trial_exceeding(trial_state):
-            trial_state.set_pause()
-            return True
-
-        if (
-            self.worker_state.worker_type == WorkerType.CPU
-            and trial_state.phase < self.trial_phase.current_phase
-        ):
-            trial_state.set_interrupted()
-            return True
-
         if trial_state.id in self.interrupt_set:
             trial_state.set_interrupted()
             self.interrupt_set.remove(trial_state.id)
@@ -282,7 +275,6 @@ class Worker:
             )
 
             trial_state.iteration += 1
-            trial_state.phase = self.trial_phase.get_trial_phase(trial_state)
             trial_state.device_iteration_count[self.worker_state.worker_type] += 1
 
         if trial_state.status == TrialStatus.INTERRUPTED:
@@ -292,8 +284,7 @@ class Worker:
 
         self.log(
             "info",
-            f"Phase: {trial_state.phase}, Iteration: {trial_state.iteration} "
-            f"Accuracy: {trial_state.accuracy}",
+            f"Iteration: {trial_state.iteration} Accuracy: {trial_state.accuracy}",
             trial_id=trial_state.id,
         )
 
@@ -411,10 +402,6 @@ class Worker:
     def stop(self) -> None:
         self.is_stop = True
 
-    def update_phase(self, phase: int) -> None:
-        self.log("info", f"更新階段到Phase {self.trial_phase.current_phase}")
-        self.trial_phase.current_phase = phase
-
 
 def generate_all_workers(
     tuner: ActorHandle,
@@ -433,7 +420,7 @@ def generate_all_workers(
     """
 
     visited_address = set()
-    worker_states = []
+    worker_states: list[WorkerState] = []
     count_gen = count(start=0, step=1)
     head_node_address = get_head_node_address()
 
@@ -445,11 +432,26 @@ def generate_all_workers(
                 continue
 
             resource = node["Resources"]
+
+            gpus = resource.get("GPU", 0)
+            cpus = resource.get("CPU", 1)
+
+            if "GPU" in resource:
+                cpus -= 1
+                worker_states.append(
+                    WorkerState(
+                        id=next(count_gen),
+                        num_cpus=1,
+                        num_gpus=gpus,
+                        node_name=f"node:{node_address}",
+                        max_trials=3,
+                        worker_type=WorkerType.GPU,
+                    ),
+                )
+
             if "CPU" in resource:
                 if node_address == head_node_address:
-                    cpus = min(resource.get("CPU", 1) - 1, 1)
-                else:
-                    cpus = resource.get("CPU", 1)
+                    cpus -= 1
 
                 worker_states.append(
                     WorkerState(
@@ -462,20 +464,10 @@ def generate_all_workers(
                     ),
                 )
 
-            if "GPU" in resource:
-                worker_states.append(
-                    WorkerState(
-                        id=next(count_gen),
-                        num_cpus=0,
-                        num_gpus=resource["GPU"],
-                        node_name=f"node:{node_address}",
-                        max_trials=3,
-                        worker_type=WorkerType.GPU,
-                    ),
-                )
             visited_address.add(node_address)
 
     workers: list[ActorHandle] = []
+    print(*worker_states, sep="\n")
 
     for index, worker_state in enumerate(worker_states):
         workers.append(
@@ -489,7 +481,6 @@ def generate_all_workers(
                 worker_state,
                 train_step,
                 tuner,
-                TrialPhase(STOP_ITERATION, PHASE_ITERATION),
                 dataloader_factory,
             ),
         )

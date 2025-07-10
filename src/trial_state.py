@@ -43,7 +43,6 @@ class TrialState:
         self.worker_type: WorkerType | None = None
         self.run_time: float = 0
         self.iteration: int = 0
-        self.phase: int = 0
         self.device_iteration_count = {WorkerType.CPU: 0, WorkerType.GPU: 0}
         self.checkpoint: Checkpoint | None = None
         self.accuracy: float = 0.0
@@ -95,7 +94,6 @@ class TrialState:
         new_trial.worker_type = self.worker_type
         new_trial.run_time = self.run_time
         new_trial.iteration = self.iteration
-        new_trial.phase = self.phase
         return new_trial
 
     def set_chunk_size(self, chunk_size: int) -> None:
@@ -273,11 +271,11 @@ class TrialManager:
         try:
             with Path(output_path).open("w") as f:
                 f.write(
-                    f"┏{'':━^4}┳{'':━^11}┳{'':━^11}┳{'':━^37}┳{'':━^3}┳{'':━^7}┳{'':━^7}┓\n"
-                    f"┃{'':^4}┃{'':^11}┃{'Worker':^11}┃{'Hyparameter':^37}┃{'':^3}┃{'':^7}┃{'':^7}┃\n"
-                    f"┃{'ID':^4}┃{'Status':^11}┣{'':━^4}┳{'':━^6}╋{'':━^7}┳{'':━^10}┳{'':━^6}┳{'':━^11}┫{'Ph':^3}┃{'Iter':^7}┃{'Acc':^7}┃\n"
-                    f"┃{'':^4}┃{'':^11}┃{'ID':^4}┃{'TYPE':^6}┃{'lr':^7}┃{'momentum':^10}┃{'bs':^6}┃{'model':^11}┃{'':^3}┃{'':^7}┃{'':^7}┃\n"
-                    f"┣{'':━^4}╋{'':━^11}╋{'':━^4}╋{'':━^6}╋{'':━^7}╋{'':━^10}╋{'':━^6}╋{'':━^11}╋{'':━^3}╋{'':━^7}╋{'':━^7}┫\n",
+                    f"┏{'':━^4}┳{'':━^11}┳{'':━^11}┳{'':━^37}┳{'':━^7}┳{'':━^7}┓\n"
+                    f"┃{'':^4}┃{'':^11}┃{'Worker':^11}┃{'Hyparameter':^37}┃{'':^7}┃{'':^7}┃\n"
+                    f"┃{'ID':^4}┃{'Status':^11}┣{'':━^4}┳{'':━^6}╋{'':━^7}┳{'':━^10}┳{'':━^6}┳{'':━^11}┫{'Iter':^7}┃{'Acc':^7}┃\n"
+                    f"┃{'':^4}┃{'':^11}┃{'ID':^4}┃{'TYPE':^6}┃{'lr':^7}┃{'momentum':^10}┃{'bs':^6}┃{'model':^11}┃{'':^7}┃{'':^7}┃\n"
+                    f"┣{'':━^4}╋{'':━^11}╋{'':━^4}╋{'':━^6}╋{'':━^7}╋{'':━^10}╋{'':━^6}╋{'':━^11}╋{'':━^7}╋{'':━^7}┫\n",
                 )
 
                 for i in self.all_trials.values():
@@ -294,10 +292,10 @@ class TrialManager:
                     if i.worker_id != -1:
                         worker_id = i.worker_id
                     f.write(
-                        f"┃{i.id:>4}┃{i.status:^11}┃{worker_id:>4}┃{worker_type:^6}┃{h.lr:>7.3f}┃{h.momentum:>10.3f}┃{h.batch_size:>6}┃{h.model_type:^11}┃{i.phase:>3}┃{i.iteration:>7}┃{i.accuracy:>7.3f}┃\n",
+                        f"┃{i.id:>4}┃{i.status:^11}┃{worker_id:>4}┃{worker_type:^6}┃{h.lr:>7.3f}┃{h.momentum:>10.3f}┃{h.batch_size:>6}┃{h.model_type:^11}┃{i.iteration:>7}┃{i.accuracy:>7.3f}┃\n",
                     )
                 f.write(
-                    f"┗{'':━^4}┻{'':━^11}┻{'':━^4}┻{'':━^6}┻{'':━^7}┻{'':━^10}┻{'':━^6}┻{'':━^11}┻{'':━^3}┻{'':━^7}┻{'':━^7}┛\n",
+                    f"┗{'':━^4}┻{'':━^11}┻{'':━^4}┻{'':━^6}┻{'':━^7}┻{'':━^10}┻{'':━^6}┻{'':━^11}┻{'':━^7}┻{'':━^7}┛\n",
                 )
 
         except Exception as e:

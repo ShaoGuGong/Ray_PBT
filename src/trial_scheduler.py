@@ -9,8 +9,6 @@ import ray
 from ray import ObjectRef
 from ray.actor import ActorHandle
 
-from .config import PHASE_ITERATION, STOP_ITERATION
-from .trial_phase import TrialPhase
 from .trial_state import TrialManager, TrialState
 from .utils import TrialStatus, WorkerType, colored_progress_bar
 
@@ -161,13 +159,11 @@ class TrialScheduler:
             train_step (TrainStepFunction): 訓練步驟函數。
             trial_states (List[TrialState]): 初始的試驗狀態列表。
         """
-        self.trial_phase = TrialPhase(STOP_ITERATION, PHASE_ITERATION)
         self.trial_manager = trial_manager
         self.running_futures: list[ObjectRef] = []
         self.logger: logging.Logger = get_trial_scheduler_logger()
         self.workers: list[ActorHandle] = workers
         self._previous_time: float = time.time()
-        self.is_final_phase: bool = False
         self.mutation_fn = mutation_fn
 
         [worker.run.remote() for worker in self.workers]
@@ -372,15 +368,3 @@ class TrialScheduler:
             future = ray.get(worker.get_log_file.remote())  # type: ignore[reportGeneralTypeIssues]
             with (Path(log_dir) / f"worker-{future['id']}.log").open("w") as f:
                 f.write(future["content"])
-
-    def update_phase(self) -> None:
-        old = self.trial_phase.current_phase
-        self.trial_phase.update_phase(self.trial_manager.all_trials.values())  # type: ignore[reportGeneralTypeIssues]
-
-        if old != self.trial_phase.current_phase:
-            self.logger.info("更新階段到Phase %d", self.trial_phase.current_phase)
-            futures = [
-                worker.update_phase.remote(self.trial_phase.current_phase)
-                for worker in self.workers
-            ]
-            ray.wait(futures, timeout=0.1)  # type: ignore[reportGeneralTypeIssues]

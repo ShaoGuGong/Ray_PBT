@@ -115,6 +115,7 @@ class DataloaderFactory(Protocol):
     def __call__(
         self,
         batch_size: int,
+        num_workers: int,
     ) -> tuple[DataLoader, DataLoader, DataLoader]: ...
 
 
