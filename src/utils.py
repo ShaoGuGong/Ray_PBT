@@ -7,7 +7,7 @@ from functools import reduce
 from typing import Any, Protocol, TypeVar
 
 import ray
-from torch import nn, optim
+from torch import device, nn, optim
 from torch.utils.data import DataLoader
 
 # ╭──────────────────────────────────────────────────────────╮
@@ -72,7 +72,7 @@ class Hyperparameter:
 
     def __str__(self) -> str:
         return (
-            f"Hyperparameter(lr:{self.lr:.3f}, momentum:{self.momentum:.3f} "
+            f"Hyperparameter(lr:{self.lr:.3f}, momentum:{self.momentum:.3f}, "
             f"batch_size:{self.batch_size:4d}, model_type:{self.model_type})"
         )
 
@@ -83,6 +83,14 @@ class Hyperparameter:
             momentum=random.uniform(0.001, 1),
             batch_size=512,
             model_type=ModelType.RESNET_18,
+        )
+
+    def explore(self) -> "Hyperparameter":
+        return Hyperparameter(
+            self.lr * 0.8,
+            self.momentum * 1.2,
+            self.batch_size,
+            self.model_type,
         )
 
 
@@ -107,6 +115,7 @@ class DataloaderFactory(Protocol):
     def __call__(
         self,
         batch_size: int,
+        num_workers: int,
     ) -> tuple[DataLoader, DataLoader, DataLoader]: ...
 
 
@@ -114,6 +123,8 @@ class ModelInitFunction(Protocol):
     def __call__(
         self,
         hyperparameter: Hyperparameter,
+        checkpoint: Checkpoint,
+        device: device,
     ) -> tuple[nn.Module, optim.Optimizer]: ...
 
 

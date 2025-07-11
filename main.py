@@ -6,18 +6,18 @@ import ray
 import torch
 import torchvision
 from torch import nn, optim
-from torch._prims_common import DeviceLikeType
 from torch.utils.data import DataLoader
 from torchvision import models, transforms
 
 from src.config import DATASET_PATH, STOP_ITERATION
 from src.trial_state import TrialState
 from src.tuner import Tuner
-from src.utils import Hyperparameter, get_head_node_address, unzip_file
+from src.utils import Checkpoint, Hyperparameter, get_head_node_address, unzip_file
 
 
 def cifar10_data_loader_factory(
     batch_size: int = 64,
+    num_workers: int = 0,
 ) -> tuple[DataLoader, DataLoader, DataLoader]:
     data_dir = Path(DATASET_PATH).expanduser()
     if not Path(data_dir).exists():
@@ -76,11 +76,13 @@ def cifar10_data_loader_factory(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
+        num_workers=num_workers,
     )
     valid_loader = DataLoader(
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
+        num_workers=num_workers,
     )
 
     # valid_loader = DataLoader(
@@ -101,14 +103,29 @@ def cifar10_data_loader_factory(
 
 def resnet18_init_fn(
     hyperparameter: Hyperparameter,
+    checkpoint: Checkpoint,
+    device: torch.device,
 ) -> tuple[nn.Module, optim.Optimizer]:
     model = models.resnet18()
     model.fc = nn.Linear(model.fc.in_features, 10)
+
+    if checkpoint:
+        model.load_state_dict(checkpoint.model_state_dict)
+    model = model.to(device)
+
     optimizer = optim.SGD(
         model.parameters(),
         lr=hyperparameter.lr,
         momentum=hyperparameter.momentum,
     )
+
+    if checkpoint:
+        optimizer.load_state_dict(checkpoint.optimizer_state_dict)
+
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = hyperparameter.lr
+        param_group["momentum"] = hyperparameter.momentum
+
     return model, optimizer
 
 
@@ -124,23 +141,12 @@ def generate_trial_states(n: int = 1) -> list[TrialState]:
     ]
 
 
-def get_resnet18(hyperparameter: Hyperparameter) -> tuple[nn.Module, optim.Optimizer]:
-    model = models.resnet18()
-    model.fc = nn.Linear(model.fc.in_features, 10)
-    optimizer = optim.SGD(
-        model.parameters(),
-        lr=hyperparameter.lr,
-        momentum=hyperparameter.momentum,
-    )
-    return model, optimizer
-
-
 def train_step(
     model: nn.Module,
     optimizer: optim.Optimizer,
     train_loader: DataLoader,
     batch_size: int,
-    device: DeviceLikeType = torch.device("cpu"),
+    device: torch.device = torch.device("cpu"),
 ) -> None:
     model.train()
     criterion = nn.CrossEntropyLoss().to(device)
@@ -158,13 +164,20 @@ if __name__ == "__main__":
     ray.init(
         runtime_env={
             "working_dir": ".",
-            "excludes": [".git", "test", "logs/*", "LICENSE", "README.md", ".venv"],
+            "excludes": [
+                ".git",
+                "test",
+                "logs/*",
+                "LICENSE",
+                "README.md",
+                ".venv",
+                ".ruff_cache",
+            ],
         },
     )
-    print("Start gen trial States")
-    trial_states = generate_trial_states(3)
+    trial_states = generate_trial_states(50)
     tuner = Tuner.options(  # type: ignore[call-arg]
-        max_concurrency=16,
+        max_concurrency=13,
         num_cpus=1,
         resources={f"node:{get_head_node_address()}": 0.01},
     ).remote(trial_states, train_step, cifar10_data_loader_factory)

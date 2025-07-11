@@ -1,21 +1,22 @@
 import logging
 import os
 import random
+import time
 import zipfile
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import ray
 
 from .trial_scheduler import TrialScheduler
-from .trial_state import TrialResult, TrialState
-from .utils import DataloaderFactory, TrainStepFunction, WorkerType
+from .trial_state import TrialManager, TrialState
+from .utils import DataloaderFactory, TrainStepFunction
 from .worker import generate_all_workers
 
 
 def get_tuner_logger() -> logging.Logger:
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    log_dir = Path(Path.cwd()) / "logs" / timestamp
+    timestamp = (datetime.now(UTC) + timedelta(hours=8)).strftime("%Y-%m-%d_%H-%M-%S")
+    log_dir = Path.cwd() / "logs" / timestamp
     Path(log_dir).mkdir(parents=True, exist_ok=True)
 
     logger = logging.getLogger("Tuner")
@@ -63,39 +64,30 @@ class Tuner:
             dataloader_factory=dataloader_factory,
         )
 
+        self.trial_manager = TrialManager(trial_states)
         self.scheduler: TrialScheduler = TrialScheduler(
-            ray.get_runtime_context().current_actor,
             self.workers,
-            trial_states,
+            self.trial_manager,
+            self.mutation,
         )
-        self.trial_result: TrialResult = TrialResult()
-
-        for trial in self.trial_states:
-            self.trial_result.record_trial_progress(trial)
 
     def run(self) -> None:
+        start = time.time()
         self.logger.info("開始訓練")
         self.scheduler.run()
         self.logger.info("結束訓練")
+        end = time.time()
+        self.logger.info("訓練總時長: %.2f 秒", end - start)
         self.scheduler.get_workers_logs()
 
-    def update_trial_result(self, trial_state: TrialState) -> None:
-        self.trial_result.update_trial_result(trial_state)
-        self.logger.info(
-            "History Best: %.6f %s",
-            self.trial_result.history_best[0],
-            self.trial_result.history_best[1],
-        )
+    def update_trial(self, trial_state: TrialState) -> None:
+        self.trial_manager.update_trial(trial_state)
 
-    def get_quantile_trial(
-        self,
-        ratio: float = 0.25,
-    ) -> tuple[list[TrialState], list[TrialState]]:
-        return self.trial_result.get_quantile(ratio)
+    def get_mutation_baseline(self) -> float:
+        return self.trial_manager.get_cached_mutation_baseline()
 
-    def record_trial_progress(self, trial_state: TrialState) -> None:
-        self.trial_result.record_trial_progress(trial_state)
-        self.trial_result.display_trial_progress()
+    def get_chunk_size(self, iteration: int) -> int:
+        return self.trial_manager.get_chunk_size(iteration)
 
     def mutation(self, trial_state: TrialState) -> TrialState:
         self.logger.info(
@@ -104,12 +96,10 @@ class Tuner:
             trial_state.hyperparameter,
         )
 
-        lower_quantile, upper_quantile = self.get_quantile_trial()
+        upper_quantile = self.trial_manager.get_upper_quantile_trials()
 
         chose_trial = random.choice(upper_quantile)
-        hyperparameter = chose_trial.hyperparameter
-        hyperparameter.lr *= 0.8
-        hyperparameter.momentum *= 1.2
+        hyperparameter = chose_trial.hyperparameter.explore()
 
         trial_state.hyperparameter = hyperparameter
         trial_state.checkpoint = chose_trial.checkpoint
@@ -122,18 +112,6 @@ class Tuner:
         )
 
         return trial_state
-
-    def get_min_iteration_trial(self) -> tuple[int, int]:
-        cpu_trial = [
-            trial
-            for trial in self.trial_result.trial_progress.values()
-            if trial.worker_type == WorkerType.CPU
-        ]
-        target = min(cpu_trial, key=lambda x: x.iteration)
-        return target.worker_id, target.id
-
-    def get_trial_progress(self) -> list[TrialState]:
-        return self.trial_result.get_trial_progress()
 
     def submit_trial(self, trial_state: TrialState) -> None:
         self.scheduler.submit_trial(trial_state)
@@ -159,5 +137,3 @@ class Tuner:
 
         with Path(zip_path).open("rb") as f:
             return f.read()
-
-        return None

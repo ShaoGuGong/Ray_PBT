@@ -1,11 +1,14 @@
+import heapq
 import math
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
-from torch import nn, optim
+from torch import device, nn, optim
 
 from .config import (
+    MUTATION_ITERATION,
     STOP_ACCURACY,
     STOP_ITERATION,
     TRIAL_PROGRESS_OUTPUT_PATH,
@@ -40,7 +43,6 @@ class TrialState:
         self.worker_type: WorkerType | None = None
         self.run_time: float = 0
         self.iteration: int = 0
-        self.phase: int = 0
         self.device_iteration_count = {WorkerType.CPU: 0, WorkerType.GPU: 0}
         self.checkpoint: Checkpoint | None = None
         self.accuracy: float = 0.0
@@ -55,10 +57,13 @@ class TrialState:
                 )
                 raise ValueError(msg)
 
-            self.model_init_fn: Callable[[], tuple[nn.Module, optim.Optimizer]] = (
-                lambda: model_init_fn(self.hyperparameter)
+            self.model_init_fn: Callable[
+                [device],
+                tuple[nn.Module, optim.Optimizer],
+            ] = (
+                lambda d: model_init_fn(self.hyperparameter, self.checkpoint, d)  # type: ignore[return-value]
             )
-            model, optimizer = self.model_init_fn()
+            model, optimizer = self.model_init_fn(device("cpu"))
             self.checkpoint = Checkpoint({}, {})
             self.update_checkpoint(model, optimizer)
 
@@ -89,7 +94,6 @@ class TrialState:
         new_trial.worker_type = self.worker_type
         new_trial.run_time = self.run_time
         new_trial.iteration = self.iteration
-        new_trial.phase = self.phase
         return new_trial
 
     def set_chunk_size(self, chunk_size: int) -> None:
@@ -98,92 +102,200 @@ class TrialState:
             raise ValueError(msg)
         self.chunk_size = chunk_size
 
+    def set_terminated(self) -> None:
+        self.status = TrialStatus.TERMINATE
 
-class TrialResult:
-    def __init__(self) -> None:
-        self.history_best: tuple[
-            float,
-            Hyperparameter | None,
-            Checkpoint | None,
-        ] = (0.0, None, None)
-        self.trial_progress: dict[int, TrialState] = {}
+    def set_pause(self) -> None:
+        self.status = TrialStatus.PAUSE
 
-    def get_trial_progress(self) -> list[TrialState]:
-        return list(self.trial_progress.values())
+    def set_interrupted(self) -> None:
+        self.status = TrialStatus.INTERRUPTED
 
-    def record_trial_progress(self, trial_state: TrialState) -> None:
-        self.trial_progress[trial_state.id] = trial_state
+    def set_running(self) -> None:
+        self.status = TrialStatus.RUNNING
 
-    def update_trial_result(self, trial_state: TrialState) -> None:
-        self.record_trial_progress(trial_state)
-        if trial_state.accuracy > self.history_best[0]:
-            self.history_best = (
-                trial_state.accuracy,
-                trial_state.hyperparameter,
-                trial_state.checkpoint,
-            )
+    def set_pending(self) -> None:
+        self.status = TrialStatus.PENDING
 
-    def get_history_best_result(
-        self,
-    ) -> tuple[float, Hyperparameter | None, Checkpoint | None]:
+    def set_need_mutation(self) -> None:
+        self.status = TrialStatus.NEED_MUTATION
+
+
+class TrialManager:
+    def __init__(self, trial_states: list[TrialState]) -> None:
+        self.all_trials = {trial.id: trial for trial in trial_states}
+        self.pending = {trial.id for trial in trial_states}
+        self.running = set()
+        self.completed = set()
+        self.history_best: TrialState | None = None
+
+        self._latest_update_mutation_baseline_ts: float = 0.0
+        self._mutation_baseline: float = 0.0
+
+    def add_trial(self, trial_state: TrialState) -> None:
+        self.all_trials[trial_state.id] = trial_state
+
+    def run_trial(self, trial_id: int) -> None:
+        trial = self.all_trials.get(trial_id, None)
+        if trial is None:
+            msg = f"Trial id {trial_id} not found"
+            raise ValueError(msg)
+
+        self.pending.discard(trial_id)
+        self.running.add(trial_id)
+
+    def pend_trial(self, trial_id: int) -> None:
+        trial = self.all_trials.get(trial_id, None)
+        if trial is None:
+            msg = f"Trial id {trial_id} not found"
+            raise ValueError(msg)
+
+        self.running.discard(trial_id)
+        self.pending.add(trial_id)
+
+    def complete_trial(self, trial_id: int) -> None:
+        trial = self.all_trials.get(trial_id, None)
+        if trial is None:
+            msg = f"Trial id {trial_id} not found"
+            raise ValueError(msg)
+
+        self.running.discard(trial_id)
+        self.completed.add(trial_id)
+
+    def get_least_iterated_pending_trial(self) -> TrialState | None:
+        if not self.pending:
+            return None
+
+        return min(
+            (self.all_trials[tid] for tid in self.pending),
+            key=lambda t: t.iteration,
+            default=None,
+        )
+
+    def get_most_iterated_pending_trial(self) -> TrialState | None:
+        if not self.pending:
+            return None
+
+        return max(
+            (self.all_trials[tid] for tid in self.pending),
+            key=lambda t: t.iteration,
+            default=None,
+        )
+
+    def get_chunk_size(self, iteration: int) -> int:
+        iterations = sorted(
+            [trial.iteration for trial in self.all_trials.values()],
+            reverse=True,
+        )
+        length = (len(iterations) // 4) + 1
+        chunk_size = sum(iterations[:length]) // length - iteration
+        chunk_size = (chunk_size + MUTATION_ITERATION) // MUTATION_ITERATION
+        return max(chunk_size, 1)
+
+    def get_history_best_result(self) -> TrialState | None:
         return self.history_best
 
-    def get_quantile(
+    def get_kth_largest_iteration_trial(self, k: int) -> TrialState | None:
+        result = heapq.nlargest(
+            k,
+            [trial for trial in self.all_trials.values() if trial.id in self.pending],
+            key=lambda t: t.iteration,
+        )
+
+        if not result:
+            return None
+        return result[-1]
+
+    def get_mutation_baseline(
         self,
         ratio: float = 0.25,
-    ) -> tuple[list[TrialState], list[TrialState]]:
-        trials = [
-            trial for trial in self.trial_progress.values() if trial.accuracy != 0
+    ) -> float:
+        accuracy = [
+            trial.accuracy for trial in self.all_trials.values() if trial.accuracy > 0
         ]
-        min_trials = 2
-        if len(trials) < min_trials:
-            return [], []
+        quantile_size = math.ceil(len(self.all_trials) * ratio)
 
-        trials.sort(key=lambda x: x.accuracy)
-        quantile_size = math.ceil(len(trials) * ratio)
+        result = heapq.nsmallest(
+            quantile_size,
+            accuracy,
+        )
 
-        if quantile_size > len(trials) / 2:
-            quantile_size: int = len(trials) // 2
+        if len(result) < quantile_size:
+            return 0.0
 
-        return trials[:quantile_size], trials[-quantile_size:]
+        return result[-1]
 
-    def display_trial_progress(
+    def get_cached_mutation_baseline(self) -> float:
+        return self._mutation_baseline
+
+    def get_uncompleted_trial_num(self) -> int:
+        return len(self.all_trials) - len(self.completed)
+
+    def get_upper_quantile_trials(self, ratio: float = 0.25) -> list[TrialState]:
+        trials = [trial for trial in self.all_trials.values() if trial.accuracy > 0]
+        quantile_size = math.ceil(len(self.all_trials) * ratio)
+        return heapq.nlargest(
+            quantile_size,
+            trials,
+            key=lambda t: t.accuracy,
+        )
+
+    def maybe_update_mutation_baseline(self) -> None:
+        now = time.time()
+        iterval_time = 5
+        if now - self._latest_update_mutation_baseline_ts > iterval_time:
+            self._latest_update_mutation_baseline_ts = now
+            self._mutation_baseline = self.get_mutation_baseline()
+
+    def update_trial(self, trial_state: TrialState) -> None:
+        if trial_state.id not in self.all_trials:
+            msg = f"Trial id {trial_state.id} not found"
+            raise ValueError(msg)
+
+        self.all_trials[trial_state.id] = trial_state
+        if trial_state.accuracy > 0 and (
+            self.history_best is None
+            or trial_state.accuracy > self.history_best.accuracy
+        ):
+            self.history_best = trial_state
+
+        self.display_trial_result()
+
+    def is_finish(self) -> bool:
+        return len(self.completed) >= len(self.all_trials)
+
+    def display_trial_result(
         self,
         output_path: Path = TRIAL_PROGRESS_OUTPUT_PATH,
     ) -> None:
         try:
             with Path(output_path).open("w") as f:
                 f.write(
-                    f"┏{'':━^4}┳{'':━^11}┳{'':━^11}┳{'':━^37}┳{'':━^3}┳{'':━^7}┳{'':━^7}┓\n",
-                )
-                f.write(
-                    f"┃{'':^4}┃{'':^11}┃{'Worker':^11}┃{'Hyparameter':^37}┃{'':^3}┃{'':^7}┃{'':^7}┃\n",
-                )
-                f.write(
-                    f"┃{'ID':^4}┃{'Status':^11}┣{'':━^4}┳{'':━^6}╋{'':━^7}┳{'':━^10}┳{'':━^6}┳{'':━^11}┫{'Ph':^3}┃{'Iter':^7}┃{'Acc':^7}┃\n",
-                )
-                f.write(
-                    f"┃{'':^4}┃{'':^11}┃{'ID':^4}┃{'TYPE':^6}┃{'lr':^7}┃{'momentum':^10}┃{'bs':^6}┃{'model':^11}┃{'':^3}┃{'':^7}┃{'':^7}┃\n",
-                )
-                f.write(
-                    f"┣{'':━^4}╋{'':━^11}╋{'':━^4}╋{'':━^6}╋{'':━^7}╋{'':━^10}╋{'':━^6}╋{'':━^11}╋{'':━^3}╋{'':━^7}╋{'':━^7}┫\n",
+                    f"┏{'':━^4}┳{'':━^11}┳{'':━^11}┳{'':━^37}┳{'':━^7}┳{'':━^7}┓\n"
+                    f"┃{'':^4}┃{'':^11}┃{'Worker':^11}┃{'Hyparameter':^37}┃{'':^7}┃{'':^7}┃\n"
+                    f"┃{'ID':^4}┃{'Status':^11}┣{'':━^4}┳{'':━^6}╋{'':━^7}┳{'':━^10}┳{'':━^6}┳{'':━^11}┫{'Iter':^7}┃{'Acc':^7}┃\n"
+                    f"┃{'':^4}┃{'':^11}┃{'ID':^4}┃{'TYPE':^6}┃{'lr':^7}┃{'momentum':^10}┃{'bs':^6}┃{'model':^11}┃{'':^7}┃{'':^7}┃\n"
+                    f"┣{'':━^4}╋{'':━^11}╋{'':━^4}╋{'':━^6}╋{'':━^7}╋{'':━^10}╋{'':━^6}╋{'':━^11}╋{'':━^7}╋{'':━^7}┫\n",
                 )
 
-                for i in self.trial_progress.values():
-                    worker_type = "None"
-                    if i.worker_type == WorkerType.CPU:
-                        worker_type = "CPU"
-                    elif i.worker_type == WorkerType.GPU:
-                        worker_type = "GPU"
+                for i in self.all_trials.values():
+                    match i.worker_type:
+                        case WorkerType.CPU:
+                            worker_type = "CPU"
+                        case WorkerType.GPU:
+                            worker_type = "GPU"
+                        case _:
+                            worker_type = ""
+
                     h = i.hyperparameter
                     worker_id = ""
                     if i.worker_id != -1:
                         worker_id = i.worker_id
                     f.write(
-                        f"┃{i.id:>4}┃{i.status:^11}┃{worker_id:>4}┃{worker_type:^6}┃{h.lr:>7.3f}┃{h.momentum:>10.3f}┃{h.batch_size:>6}┃{h.model_type:^11}┃{i.phase:>3}┃{i.iteration:>7}┃{i.accuracy:>7.3f}┃\n",
+                        f"┃{i.id:>4}┃{i.status:^11}┃{worker_id:>4}┃{worker_type:^6}┃{h.lr:>7.3f}┃{h.momentum:>10.3f}┃{h.batch_size:>6}┃{h.model_type:^11}┃{i.iteration:>7}┃{i.accuracy:>7.3f}┃\n",
                     )
                 f.write(
-                    f"┗{'':━^4}┻{'':━^11}┻{'':━^4}┻{'':━^6}┻{'':━^7}┻{'':━^10}┻{'':━^6}┻{'':━^11}┻{'':━^3}┻{'':━^7}┻{'':━^7}┛\n",
+                    f"┗{'':━^4}┻{'':━^11}┻{'':━^4}┻{'':━^6}┻{'':━^7}┻{'':━^10}┻{'':━^6}┻{'':━^11}┻{'':━^7}┻{'':━^7}┛\n",
                 )
 
         except Exception as e:
