@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from itertools import islice
 from pathlib import Path
 
@@ -13,6 +13,8 @@ from src.config import DATASET_PATH, STOP_ITERATION
 from src.trial_state import TrialState
 from src.tuner import Tuner
 from src.utils import Checkpoint, Hyperparameter, get_head_node_address, unzip_file
+
+DEFAULT_DEVICE = torch.device("cpu")
 
 
 def cifar10_data_loader_factory(
@@ -103,14 +105,23 @@ def cifar10_data_loader_factory(
 
 def resnet18_init_fn(
     hyperparameter: Hyperparameter,
-    checkpoint: Checkpoint,
+    checkpoint: Checkpoint | None,
     device: torch.device,
 ) -> tuple[nn.Module, optim.Optimizer]:
     model = models.resnet18()
     model.fc = nn.Linear(model.fc.in_features, 10)
 
-    if checkpoint:
-        model.load_state_dict(checkpoint.model_state_dict)
+    if checkpoint is None:
+        model.to(device)
+        optimizer = optim.SGD(
+            model.parameters(),
+            lr=hyperparameter.lr,
+            momentum=hyperparameter.momentum,
+        )
+
+        return model, optimizer
+
+    model.load_state_dict(checkpoint.model_state_dict)
     model = model.to(device)
 
     optimizer = optim.SGD(
@@ -118,9 +129,7 @@ def resnet18_init_fn(
         lr=hyperparameter.lr,
         momentum=hyperparameter.momentum,
     )
-
-    if checkpoint:
-        optimizer.load_state_dict(checkpoint.optimizer_state_dict)
+    optimizer.load_state_dict(checkpoint.optimizer_state_dict)
 
     for param_group in optimizer.param_groups:
         param_group["lr"] = hyperparameter.lr
@@ -146,7 +155,7 @@ def train_step(
     optimizer: optim.Optimizer,
     train_loader: DataLoader,
     batch_size: int,
-    device: torch.device = torch.device("cpu"),
+    device: torch.device = DEFAULT_DEVICE,
 ) -> None:
     model.train()
     criterion = nn.CrossEntropyLoss().to(device)
@@ -185,7 +194,9 @@ if __name__ == "__main__":
 
     zip_logs_bytes: bytes = ray.get(tuner.get_zipped_log.remote())  # type: ignore[call-arg]
 
-    zip_output_dir = f"./logs/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}/"
+    time_stamp = (datetime.now(UTC) + timedelta(hours=8)).strftime("%Y-%m-%d_%H-%M-%S")
+    zip_output_dir = f"./logs/{time_stamp}/"
+
     Path(zip_output_dir).mkdir(parents=True, exist_ok=True)
     zip_output_path = Path(zip_output_dir) / "logs.zip"
     with Path(zip_output_path).open("wb") as f:

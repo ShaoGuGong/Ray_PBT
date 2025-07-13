@@ -1,9 +1,11 @@
+import copy
 import heapq
 import math
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import ray
 import torch
 from torch import device, nn, optim
 
@@ -15,9 +17,11 @@ from .config import (
 )
 from .utils import (
     Checkpoint,
+    CheckpointLocation,
     Hyperparameter,
     ModelInitFunction,
     TrialStatus,
+    WorkerState,
     WorkerType,
 )
 
@@ -30,10 +34,8 @@ class TrialState:
         self,
         trial_id: int,
         hyperparameter: Hyperparameter,
+        model_init_fn: ModelInitFunction,
         stop_iteration: int = STOP_ITERATION,
-        *,
-        model_init_fn: ModelInitFunction | None = None,
-        without_checkpoint: bool = False,
     ) -> None:
         self.id: int = trial_id
         self.hyperparameter: Hyperparameter = hyperparameter
@@ -48,24 +50,25 @@ class TrialState:
         self.accuracy: float = 0.0
         self.stop_accuracy: int = STOP_ACCURACY
         self.chunk_size: int = 1
+        self.last_checkpoint_location: CheckpointLocation | None = None
+        self.model_init_fn: Callable[
+            [device],
+            tuple[nn.Module, optim.Optimizer],
+        ] = (
+            lambda device: model_init_fn(
+                self.hyperparameter,
+                self.checkpoint,
+                device,
+            )  # type: ignore[return-value]
+        )
 
-        if not without_checkpoint:
-            if model_init_fn is None:
-                msg = (
-                    f"TrialState(id={self.id}) requires a model_factory to create model"
-                    "and optimizer unless `without_checkpoint=True`"
-                )
-                raise ValueError(msg)
-
-            self.model_init_fn: Callable[
-                [device],
-                tuple[nn.Module, optim.Optimizer],
-            ] = (
-                lambda d: model_init_fn(self.hyperparameter, self.checkpoint, d)  # type: ignore[return-value]
-            )
-            model, optimizer = self.model_init_fn(device("cpu"))
-            self.checkpoint = Checkpoint({}, {})
-            self.update_checkpoint(model, optimizer)
+    def update_worker_state(self, worker_state: WorkerState) -> None:
+        self.worker_type = worker_state.worker_type
+        self.worker_id = worker_state.id
+        self.last_checkpoint_location = CheckpointLocation(
+            worker_state.id,
+            ray.get_runtime_context().current_actor,
+        )
 
     def update_checkpoint(self, model: nn.Module, optimizer: optim.Optimizer) -> None:
         if self.checkpoint is None:
@@ -81,19 +84,8 @@ class TrialState:
         self.checkpoint.optimizer_state_dict = optimizer_state_dict
 
     def without_checkpoint(self) -> "TrialState":
-        new_trial = TrialState(
-            self.id,
-            self.hyperparameter,
-            self.stop_iteration,
-            model_init_fn=None,
-            without_checkpoint=True,
-        )
-        new_trial.accuracy = self.accuracy
-        new_trial.status = self.status
-        new_trial.worker_id = self.worker_id
-        new_trial.worker_type = self.worker_type
-        new_trial.run_time = self.run_time
-        new_trial.iteration = self.iteration
+        new_trial = copy.copy(self)
+        new_trial.checkpoint = None
         return new_trial
 
     def set_chunk_size(self, chunk_size: int) -> None:
@@ -298,5 +290,5 @@ class TrialManager:
                     f"┗{'':━^4}┻{'':━^11}┻{'':━^4}┻{'':━^6}┻{'':━^7}┻{'':━^10}┻{'':━^6}┻{'':━^11}┻{'':━^7}┻{'':━^7}┛\n",
                 )
 
-        except Exception as e:
-            print(f"{e}")
+        except Exception as e:  # noqa: BLE001
+            print(f"{e}")  # noqa: T201

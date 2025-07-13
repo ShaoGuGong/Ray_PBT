@@ -7,6 +7,7 @@ from functools import reduce
 from typing import Any, Protocol, TypeVar
 
 import ray
+from ray.actor import ActorHandle
 from torch import device, nn, optim
 from torch.utils.data import DataLoader
 
@@ -100,6 +101,12 @@ class Checkpoint:
     optimizer_state_dict: dict
 
 
+@dataclass
+class CheckpointLocation:
+    worker_id: int
+    worker_reference: ActorHandle
+
+
 # ╭──────────────────────────────────────────────────────────╮
 # │                       Type Define                        │
 # ╰──────────────────────────────────────────────────────────╯
@@ -123,7 +130,7 @@ class ModelInitFunction(Protocol):
     def __call__(
         self,
         hyperparameter: Hyperparameter,
-        checkpoint: Checkpoint,
+        checkpoint: Checkpoint | None,
         device: device,
     ) -> tuple[nn.Module, optim.Optimizer]: ...
 

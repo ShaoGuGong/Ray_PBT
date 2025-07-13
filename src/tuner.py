@@ -82,6 +82,12 @@ class Tuner:
 
     def update_trial(self, trial_state: TrialState) -> None:
         self.trial_manager.update_trial(trial_state)
+        if self.trial_manager.history_best:
+            self.logger.info(
+                "History best accuracy: %.2f ,%s",
+                self.trial_manager.history_best.accuracy,
+                str(self.trial_manager.history_best.hyperparameter),
+            )
 
     def get_mutation_baseline(self) -> float:
         return self.trial_manager.get_cached_mutation_baseline()

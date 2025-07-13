@@ -130,11 +130,7 @@ class Worker:
         self.interrupt_set: set = set()
         self.dataloader_factory: DataloaderFactory = dataloader_factory
         self.is_stop: bool = False
-        self.trial_iteration_count: dict[int, int] = {}
         self.log("info", "初始化完成")
-
-        if self.worker_state.worker_type == WorkerType.CPU:
-            torch.set_num_threads(int(self.worker_state.num_cpus))
 
     def get_active_trials_nums(self) -> int:
         """
@@ -178,9 +174,7 @@ class Worker:
             return
 
         self.active_trials[trial_state.id] = trial_state
-        self.trial_iteration_count[trial_state.id] = 0
-        trial_state.worker_id = self.worker_state.id
-        trial_state.worker_type = self.worker_state.worker_type
+        trial_state.update_worker_state(self.worker_state)
         self.log("info", f"Running Trials: {list(self.active_trials)}")
 
     def run(self) -> None:
@@ -203,7 +197,7 @@ class Worker:
             hyper = trial_state.hyperparameter
             train_loader, test_loader, _ = self.dataloader_factory(
                 hyper.batch_size,
-                num_workers=int(self.worker_state.num_cpus),
+                num_workers=0,
             )
             model, optimizer = trial_state.model_init_fn(self.device)
 
@@ -298,14 +292,14 @@ class Worker:
             return trial_state
 
         baseline = ray.get(self.tuner.get_mutation_baseline.remote())  # type: ignore[reportGeneralTypeIssues]
-        self.log(
-            "info",
-            f"Baseline: {baseline}, Accuracy: {trial_state.accuracy}",
-            trial_id=trial_state.id,
-        )
-
         mutation_ratio = 0.25
+
         if trial_state.accuracy <= baseline and random.random() >= mutation_ratio:
+            self.log(
+                "info",
+                f"Baseline: {baseline}, Accuracy: {trial_state.accuracy}",
+                trial_id=trial_state.id,
+            )
             trial_state.set_need_mutation()
 
         return trial_state
@@ -407,7 +401,7 @@ def generate_all_workers(
     tuner: ActorHandle,
     train_step: TrainStepFunction,
     dataloader_factory: DataloaderFactory,
-) -> list[ActorHandle]:
+) -> dict[int, ActorHandle]:
     """
     根據 Ray 叢集的節點資源建立所有 Worker。
 
@@ -466,23 +460,21 @@ def generate_all_workers(
 
             visited_address.add(node_address)
 
-    workers: list[ActorHandle] = []
-    print(*worker_states, sep="\n")
+    print(*worker_states, sep="\n")  # noqa: T201
+    workers: dict[int, ActorHandle] = {}
 
-    for index, worker_state in enumerate(worker_states):
-        workers.append(
-            Worker.options(  # type: ignore[reportGeneralTypeIssues]
-                max_concurrency=worker_state.max_trials + 3,
-                name=f"worker-{index}",
-                num_cpus=worker_state.num_cpus,
-                num_gpus=worker_state.num_gpus,
-                resources={worker_state.node_name: 0.01},
-            ).remote(
-                worker_state,
-                train_step,
-                tuner,
-                dataloader_factory,
-            ),
+    for worker_state in worker_states:
+        workers[worker_state.id] = Worker.options(  # type: ignore[reportGeneralTypeIssues]
+            max_concurrency=worker_state.max_trials + 3,
+            name=f"worker-{worker_state.id}",
+            num_cpus=worker_state.num_cpus,
+            num_gpus=worker_state.num_gpus,
+            resources={worker_state.node_name: 0.01},
+        ).remote(
+            worker_state,
+            train_step,
+            tuner,
+            dataloader_factory,
         )
 
     return workers

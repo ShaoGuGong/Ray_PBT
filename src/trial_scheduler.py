@@ -148,7 +148,7 @@ class TrialScheduler:
 
     def __init__(
         self,
-        workers: list[ActorHandle],
+        workers: dict[int, ActorHandle],
         trial_manager: TrialManager,
         mutation_fn: Callable[[TrialState], TrialState],
     ) -> None:
@@ -162,39 +162,23 @@ class TrialScheduler:
         self.trial_manager = trial_manager
         self.running_futures: list[ObjectRef] = []
         self.logger: logging.Logger = get_trial_scheduler_logger()
-        self.workers: list[ActorHandle] = workers
+        self.workers: dict[int, ActorHandle] = workers
         self._previous_time: float = time.time()
         self.mutation_fn = mutation_fn
 
-        [worker.run.remote() for worker in self.workers]
+        [worker.run.remote() for worker in self.workers.values()]
 
-        gpu_workers = [
-            worker
-            for worker in self.workers
+        self.gpu_workers: dict[int, ActorHandle] = {
+            worker_id: worker
+            for worker_id, worker in self.workers.items()
             if ray.get(worker.get_worker_type.remote()) == WorkerType.GPU  # type: ignore[reportGeneralTypeIssues]
-        ]
+        }
 
-        self.gpu_workers: dict[int, ActorHandle] = dict(
-            zip(
-                ray.get([worker.get_id.remote() for worker in gpu_workers]),  # type:ignore[reportGeneralTypeIssues]
-                gpu_workers,
-                strict=True,  # type:ignore[reportGeneralTypeIssues]
-            ),
-        )
-
-        cpu_workers = [
-            worker
-            for worker in self.workers
+        self.cpu_workers = {
+            worker_id: worker
+            for worker_id, worker in self.workers.items()
             if ray.get(worker.get_worker_type.remote()) == WorkerType.CPU  # type:ignore[reportGeneralTypeIssues]
-        ]
-
-        self.cpu_workers: dict[int, ActorHandle] = dict(
-            zip(
-                ray.get([worker.get_id.remote() for worker in cpu_workers]),  # type:ignore[reportGeneralTypeIssues]
-                cpu_workers,
-                strict=True,  # type:ignore[reportGeneralTypeIssues]
-            ),
-        )
+        }
 
         self.logger.info("初始化完成")
 
@@ -207,7 +191,7 @@ class TrialScheduler:
         Returns:
             List[ObjectRef]: 當前正在運行的訓練任務列表。
         """
-        if self.trial_manager.get_uncompleted_trial_num() < len(self.gpu_workers) * 3:
+        if self.trial_manager.get_uncompleted_trial_num() < len(self.cpu_workers):
             gpu_stealing_strategy(list(self.cpu_workers.values()), logger=self.logger)
 
         else:
@@ -251,8 +235,8 @@ class TrialScheduler:
 
             case TrialStatus.PAUSE:
                 trial_state.set_pending()
-                self.trial_manager.update_trial(trial_state)
                 self.trial_manager.pend_trial(trial_state.id)
+                self.trial_manager.update_trial(trial_state)
                 self.logger.info(
                     "🔃 Worker %2d 回傳未完成 Trial %2d, Iteration: %d, Accuracy: %.2f",
                     trial_state.worker_id,
@@ -310,16 +294,10 @@ class TrialScheduler:
                 update_assign_time = current_time
                 self.trial_manager.maybe_update_mutation_baseline()
                 self.assign_trial_to_worker()
-                if self.trial_manager.history_best:
-                    self.logger.info(
-                        "History best accuracy: %.2f ,%s",
-                        self.trial_manager.history_best.accuracy,
-                        str(self.trial_manager.history_best.hyperparameter),
-                    )
 
         self.print_iteration_count()
         self.logger.info("🎉 所有 Trial 訓練完成!")
-        futures = [worker.stop.remote() for worker in self.workers]
+        futures = [worker.stop.remote() for worker in self.workers.values()]
         ray.get(futures)  # type:ignore[reportGeneralTypeIssues]
 
     def print_iteration_count(self) -> None:
@@ -331,15 +309,16 @@ class TrialScheduler:
         iteration_counts.sort(key=lambda x: x[0])
 
         for index, value in iteration_counts:
-            print(
-                f"Trial:{index:2} CPU/GPU",
+            self.logger.info(
+                "Trial:%2d CPU/GPU %s",
+                index,
                 colored_progress_bar(
                     [value[WorkerType.CPU], value[WorkerType.GPU]],
                     40,
                 ),
             )
-        print(
-            "Total    CPU/GPU",
+        self.logger.info(
+            "Total    CPU/GPU %s",
             colored_progress_bar(
                 [
                     sum(i[1][WorkerType.CPU] for i in iteration_counts),
@@ -364,7 +343,7 @@ class TrialScheduler:
             self.logger.error("logs檔案資料夾不存在")
             return
 
-        for worker in self.workers:
+        for worker in self.workers.values():
             future = ray.get(worker.get_log_file.remote())  # type: ignore[reportGeneralTypeIssues]
             with (Path(log_dir) / f"worker-{future['id']}.log").open("w") as f:
                 f.write(future["content"])
