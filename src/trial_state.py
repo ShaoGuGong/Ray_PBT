@@ -1,7 +1,6 @@
 import copy
 import heapq
 import math
-import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -83,7 +82,20 @@ class TrialState:
                     state[k] = v.cpu()
         self.checkpoint.optimizer_state_dict = optimizer_state_dict
 
-    def without_checkpoint(self) -> "TrialState":
+    def get_remote_checkpoint(self) -> Checkpoint:
+        return ray.get(
+            self.last_checkpoint_location.worker_reference.get_saved_checkpoint.remote(  # type:ignore[reportGeneralTypeIssues]
+                self.id,
+            ),
+        )
+
+    def pop_remote_checkpoint(self) -> None:
+        self.last_checkpoint_location.worker_reference.pop_saved_checkpoint.remote(  # type:ignore[reportGeneralTypeIssues]
+            self.id,
+        )
+
+    @property
+    def snapshot(self) -> "TrialState":
         new_trial = copy.copy(self)
         new_trial.checkpoint = None
         return new_trial
@@ -121,8 +133,8 @@ class TrialManager:
         self.completed = set()
         self.history_best: TrialState | None = None
 
-        self._latest_update_mutation_baseline_ts: float = 0.0
         self._mutation_baseline: float = 0.0
+        self._upper_quantile_trials: list[TrialState] = []
 
     def add_trial(self, trial_state: TrialState) -> None:
         self.all_trials[trial_state.id] = trial_state
@@ -220,6 +232,9 @@ class TrialManager:
     def get_cached_mutation_baseline(self) -> float:
         return self._mutation_baseline
 
+    def get_cached_upper_quantile_trials(self) -> list[TrialState]:
+        return self._upper_quantile_trials
+
     def get_uncompleted_trial_num(self) -> int:
         return len(self.all_trials) - len(self.completed)
 
@@ -233,11 +248,8 @@ class TrialManager:
         )
 
     def maybe_update_mutation_baseline(self) -> None:
-        now = time.time()
-        iterval_time = 5
-        if now - self._latest_update_mutation_baseline_ts > iterval_time:
-            self._latest_update_mutation_baseline_ts = now
-            self._mutation_baseline = self.get_mutation_baseline()
+        self._mutation_baseline = self.get_mutation_baseline()
+        self._upper_quantile_trials = self.get_upper_quantile_trials()
 
     def update_trial(self, trial_state: TrialState) -> None:
         if trial_state.id not in self.all_trials:

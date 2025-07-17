@@ -1,10 +1,12 @@
+import logging
 import random
+import time
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, auto
-from functools import reduce
-from typing import Any, Protocol, TypeVar
+from functools import reduce, wraps
+from typing import Any, ParamSpec, Protocol, TypeVar
 
 import ray
 from ray.actor import ActorHandle
@@ -59,9 +61,21 @@ class WorkerState:
     num_cpus: int
     num_gpus: int
     node_name: str
-    calculate_ability: float = 0.0
     max_trials: int = 1
     worker_type: WorkerType = WorkerType.CPU
+
+    total_train_time: float = 0.0
+    train_step_count: int = 0
+
+    @property
+    def avg_train_time(self) -> float:
+        if self.train_step_count == 0:
+            return 0.0
+        return self.total_train_time / self.train_step_count
+
+    def record_train_time(self, duration: float) -> None:
+        self.total_train_time += duration
+        self.train_step_count += 1
 
 
 @dataclass
@@ -193,3 +207,37 @@ def colored_progress_bar(data: list[int], bar_width: int) -> str:
 def unzip_file(zip_path: str, extract_to: str) -> None:
     with zipfile.ZipFile(zip_path, "r") as zf:
         zf.extractall(extract_to)
+
+
+# ╭──────────────────────────────────────────────────────────╮
+# │                        Decorators                        │
+# ╰──────────────────────────────────────────────────────────╯
+
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+def timer() -> Callable[[Callable[P, R]], Callable[P, R]]:
+    def decorator(func: Callable[P, R]) -> Callable[P, R]:
+        @wraps(func)
+        def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+            start = time.perf_counter()
+            result = func(*args, **kwargs)
+            end = time.perf_counter()
+            message = f"Function '{func.__name__}' 花費 {end - start:.6f} 秒"
+
+            if args and hasattr(args[0], "logger"):
+                logger = getattr(args[0], "logger", None)
+
+                if isinstance(logger, logging.Logger | logging.LoggerAdapter):
+                    logger.info(message)
+                else:
+                    print(message)
+
+            else:
+                print(message)
+            return result
+
+        return wrapper
+
+    return decorator

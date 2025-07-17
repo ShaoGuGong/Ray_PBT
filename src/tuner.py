@@ -10,7 +10,7 @@ import ray
 
 from .trial_scheduler import TrialScheduler
 from .trial_state import TrialManager, TrialState
-from .utils import DataloaderFactory, TrainStepFunction
+from .utils import DataloaderFactory, TrainStepFunction, TrialStatus
 from .worker import generate_all_workers
 
 
@@ -68,7 +68,6 @@ class Tuner:
         self.scheduler: TrialScheduler = TrialScheduler(
             self.workers,
             self.trial_manager,
-            self.mutation,
         )
 
     def run(self) -> None:
@@ -120,7 +119,65 @@ class Tuner:
         return trial_state
 
     def submit_trial(self, trial_state: TrialState) -> None:
-        self.scheduler.submit_trial(trial_state)
+        status = trial_state.status
+
+        match status:
+            case TrialStatus.INTERRUPTED:
+                trial_state.set_pending()
+                self.trial_manager.pend_trial(trial_state.id)
+                self.trial_manager.update_trial(trial_state)
+                self.logger.info(
+                    "🔃 Worker %2d 回傳已中斷 Trial %2d",
+                    trial_state.worker_id,
+                    trial_state.id,
+                )
+
+            case TrialStatus.PAUSE:
+                trial_state.set_pending()
+                self.trial_manager.pend_trial(trial_state.id)
+                self.trial_manager.update_trial(trial_state)
+                self.logger.info(
+                    "🔃 Worker %2d 回傳未完成 Trial %2d, Iteration: %d, Accuracy: %.2f",
+                    trial_state.worker_id,
+                    trial_state.id,
+                    trial_state.iteration,
+                    trial_state.accuracy,
+                )
+
+            case TrialStatus.NEED_MUTATION:
+                trial_state.set_pending()
+                trial_state = self.mutation(trial_state)  # type: ignore[reportGeneralTypeIssues]
+                if trial_state.checkpoint is None:
+                    self.logger.debug("Trial %d checkpoint is None", trial_state.id)
+                self.trial_manager.pend_trial(trial_state.id)
+                self.trial_manager.update_trial(trial_state)
+
+            case TrialStatus.TERMINATE:
+                trial_state.set_terminated()
+                self.trial_manager.complete_trial(trial_state.id)
+                self.trial_manager.update_trial(trial_state)
+                self.logger.info(
+                    "✅ Worker %2d Trial %2d 完成, Accuracy: %.2f",
+                    trial_state.worker_id,
+                    trial_state.id,
+                    trial_state.accuracy,
+                )
+
+                self.logger.info(
+                    "✅ 已完成的訓練任務列表: %s",
+                    self.trial_manager.completed,
+                )
+
+            case TrialStatus.FAILED:
+                self.trial_manager.complete_trial(trial_state.id)
+                self.logger.warning(
+                    "Worker %2d Trial %2d  發生錯誤, 已中止訓練",
+                    trial_state.worker_id,
+                    trial_state.id,
+                )
+
+        trial_state.worker_id = -1
+        trial_state.worker_type = None
 
     def get_zipped_log(self) -> bytes:
         log_dir = None

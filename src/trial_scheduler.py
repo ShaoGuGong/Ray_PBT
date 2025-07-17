@@ -1,6 +1,5 @@
 import logging
 import time
-from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -10,7 +9,7 @@ from ray import ObjectRef
 from ray.actor import ActorHandle
 
 from .trial_state import TrialManager, TrialState
-from .utils import TrialStatus, WorkerType, colored_progress_bar
+from .utils import WorkerType, colored_progress_bar
 
 
 def cpu_scheduling(
@@ -150,7 +149,6 @@ class TrialScheduler:
         self,
         workers: dict[int, ActorHandle],
         trial_manager: TrialManager,
-        mutation_fn: Callable[[TrialState], TrialState],
     ) -> None:
         """
         初始化 TrialScheduler, 設置試驗狀態和工作者。
@@ -164,7 +162,6 @@ class TrialScheduler:
         self.logger: logging.Logger = get_trial_scheduler_logger()
         self.workers: dict[int, ActorHandle] = workers
         self._previous_time: float = time.time()
-        self.mutation_fn = mutation_fn
 
         [worker.run.remote() for worker in self.workers.values()]
 
@@ -191,7 +188,12 @@ class TrialScheduler:
         Returns:
             List[ObjectRef]: 當前正在運行的訓練任務列表。
         """
-        if self.trial_manager.get_uncompleted_trial_num() < len(self.cpu_workers):
+        uncompleted_trial_num = self.trial_manager.get_uncompleted_trial_num()
+        if self.trial_manager.get_uncompleted_trial_num() < len(self.gpu_workers) * 3:
+            self.logger.info(
+                "當前未完成的試驗數量: %d, 嘗試執行搶奪",
+                uncompleted_trial_num,
+            )
             gpu_stealing_strategy(list(self.cpu_workers.values()), logger=self.logger)
 
         else:
@@ -219,67 +221,6 @@ class TrialScheduler:
             self.trial_manager.run_trial(trial_state.id)
             self.trial_manager.update_trial(trial_state)
 
-    def submit_trial(self, trial_state: TrialState) -> None:
-        status = trial_state.status
-
-        match status:
-            case TrialStatus.INTERRUPTED:
-                trial_state.set_pending()
-                self.trial_manager.pend_trial(trial_state.id)
-                self.trial_manager.update_trial(trial_state)
-                self.logger.info(
-                    "🔃 Worker %2d 回傳已中斷 Trial %2d",
-                    trial_state.worker_id,
-                    trial_state.id,
-                )
-
-            case TrialStatus.PAUSE:
-                trial_state.set_pending()
-                self.trial_manager.pend_trial(trial_state.id)
-                self.trial_manager.update_trial(trial_state)
-                self.logger.info(
-                    "🔃 Worker %2d 回傳未完成 Trial %2d, Iteration: %d, Accuracy: %.2f",
-                    trial_state.worker_id,
-                    trial_state.id,
-                    trial_state.iteration,
-                    trial_state.accuracy,
-                )
-
-            case TrialStatus.NEED_MUTATION:
-                trial_state.set_pending()
-                trial_state = self.mutation_fn(trial_state)  # type: ignore[reportGeneralTypeIssues]
-                if trial_state.checkpoint is None:
-                    self.logger.debug("Trial %d checkpoint is None", trial_state.id)
-                self.trial_manager.pend_trial(trial_state.id)
-                self.trial_manager.update_trial(trial_state)
-
-            case TrialStatus.TERMINATE:
-                trial_state.set_terminated()
-                self.trial_manager.complete_trial(trial_state.id)
-                self.trial_manager.update_trial(trial_state)
-                self.logger.info(
-                    "✅ Worker %2d Trial %2d 完成, Accuracy: %.2f",
-                    trial_state.worker_id,
-                    trial_state.id,
-                    trial_state.accuracy,
-                )
-
-                self.logger.info(
-                    "✅ 已完成的訓練任務列表: %s",
-                    self.trial_manager.completed,
-                )
-
-            case TrialStatus.FAILED:
-                self.trial_manager.complete_trial(trial_state.id)
-                self.logger.warning(
-                    "Worker %2d Trial %2d  發生錯誤, 已中止訓練",
-                    trial_state.worker_id,
-                    trial_state.id,
-                )
-
-        trial_state.worker_id = -1
-        trial_state.worker_type = None
-
     def run(self) -> None:
         """
         開始訓練過程, 將試驗分配給工作者並處理完成的結果。
@@ -292,7 +233,6 @@ class TrialScheduler:
         while not self.trial_manager.is_finish():
             if (current_time := time.time()) - update_assign_time > 1.0:
                 update_assign_time = current_time
-                self.trial_manager.maybe_update_mutation_baseline()
                 self.assign_trial_to_worker()
 
         self.print_iteration_count()

@@ -15,12 +15,14 @@ from .config import (
 from .trial_state import TrialState
 from .utils import (
     Accuracy,
+    Checkpoint,
     DataloaderFactory,
     TrainStepFunction,
     TrialStatus,
     WorkerState,
     WorkerType,
     get_head_node_address,
+    timer,
 )
 
 
@@ -55,7 +57,7 @@ class WorkerLoggerFormatter(logging.Formatter):
         return super().format(record)
 
 
-def get_worker_logger(worker_id: int) -> logging.Logger:
+def get_worker_logger(worker_id: int, worker_type: WorkerType) -> logging.LoggerAdapter:
     """
     建立並回傳指定 worker_id 的 logger, 支援終端輸出與檔案寫入。
 
@@ -89,7 +91,10 @@ def get_worker_logger(worker_id: int) -> logging.Logger:
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
 
-    return logger
+    return logging.LoggerAdapter(
+        logger,
+        {"worker_id": worker_id, "worker_type": worker_type},
+    )
 
 
 @ray.remote
@@ -124,13 +129,17 @@ class Worker:
         self.active_trials: dict[int, TrialState] = {}
         self.train_step: TrainStepFunction = train_step
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.logger = get_worker_logger(worker_id=worker_state.id)
+        self.logger = get_worker_logger(
+            worker_id=worker_state.id,
+            worker_type=worker_state.worker_type,
+        )
         self.tuner: ActorHandle = tuner
         self.mutation_iteration: int = MUTATION_ITERATION
         self.interrupt_set: set = set()
         self.dataloader_factory: DataloaderFactory = dataloader_factory
         self.is_stop: bool = False
-        self.log("info", "初始化完成")
+        self.saved_checkpoint: dict[int, Checkpoint] = {}
+        self.logger.info("初始化完成")
 
     def get_active_trials_nums(self) -> int:
         """
@@ -153,6 +162,12 @@ class Worker:
         """
         return self.worker_state.max_trials - len(self.active_trials)
 
+    def get_saved_checkpoint(self, trial_id: int) -> Checkpoint | None:
+        return self.saved_checkpoint.get(trial_id, None)
+
+    def pop_saved_checkpoint(self, trial_id: int) -> Checkpoint | None:
+        return self.saved_checkpoint.pop(trial_id, None)
+
     def send_signal(self, trial_id: int) -> None:
         if trial_id not in self.active_trials:
             self.log("info", f"TRIAL_ID: {trial_id}不存在, {self.active_trials.keys()}")
@@ -160,6 +175,7 @@ class Worker:
         self.log("info", f"接收到訊號 trial: {trial_id}")
         self.interrupt_set.add(trial_id)
 
+    @timer()
     def assign_trial(self, trial_state: TrialState) -> None:
         """
         將試驗分配給該 worker 並開始訓練。
@@ -197,7 +213,7 @@ class Worker:
             hyper = trial_state.hyperparameter
             train_loader, test_loader, _ = self.dataloader_factory(
                 hyper.batch_size,
-                num_workers=0,
+                num_workers=min(4, self.worker_state.num_cpus),
             )
             model, optimizer = trial_state.model_init_fn(self.device)
 
@@ -212,6 +228,10 @@ class Worker:
                         | TrialStatus.INTERRUPTED
                     ):
                         trial_state.update_checkpoint(model, optimizer)
+                        if trial_state.checkpoint:
+                            self.saved_checkpoint[trial_state.id] = (
+                                trial_state.checkpoint
+                            )
                         self.tuner.submit_trial.remote(trial_state)  # type: ignore[reportGeneralTypeIssues]
                         self.active_trials.pop(trial_state.id)
                         break
@@ -222,6 +242,8 @@ class Worker:
             if trial_state.status == TrialStatus.RUNNING:
                 trial_state.set_pause()
                 trial_state.update_checkpoint(model, optimizer)
+                if trial_state.checkpoint:
+                    self.saved_checkpoint[trial_state.id] = trial_state.checkpoint
                 self.tuner.submit_trial.remote(trial_state)
                 self.active_trials.pop(trial_state.id)
 
@@ -283,8 +305,8 @@ class Worker:
         )
 
         if (
-            trial_state.iteration > trial_state.stop_iteration
-            or trial_state.accuracy > trial_state.stop_accuracy
+            trial_state.iteration >= trial_state.stop_iteration
+            or trial_state.accuracy >= trial_state.stop_accuracy
         ):
             trial_state.set_terminated()
 
@@ -339,7 +361,7 @@ class Worker:
             dict: 包含 worker ID 與對應日誌內容的字典。
         """
         log_dir = None
-        for handler in self.logger.handlers:
+        for handler in self.logger.logger.handlers:
             if isinstance(handler, logging.FileHandler):
                 log_dir = handler.baseFilename
                 break
@@ -360,11 +382,7 @@ class Worker:
             message (str): 要記錄的訊息。
             trial_id (Union[int, str], optional): 試驗 ID。預設為 "N/A"。
         """
-        extra = {
-            "worker_type": self.worker_state.worker_type,
-            "worker_id": self.worker_state.id,
-            "trial_id": trial_id,
-        }
+        extra = {"trial_id": trial_id}
         if level == "info":
             self.logger.info(message, extra=extra)
             return
