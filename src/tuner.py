@@ -147,8 +147,8 @@ class Tuner:
             case TrialStatus.NEED_MUTATION:
                 trial_state.set_pending()
                 trial_state = self.mutation(trial_state)  # type: ignore[reportGeneralTypeIssues]
-                if trial_state.checkpoint is None:
-                    self.logger.debug("Trial %d checkpoint is None", trial_state.id)
+                if trial_state.checkpoint.is_empty():
+                    self.logger.warning("Trial %d checkpoint is None", trial_state.id)
                 self.trial_manager.pend_trial(trial_state.id)
                 self.trial_manager.update_trial(trial_state)
 

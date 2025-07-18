@@ -45,11 +45,11 @@ class TrialState:
         self.run_time: float = 0
         self.iteration: int = 0
         self.device_iteration_count = {WorkerType.CPU: 0, WorkerType.GPU: 0}
-        self.checkpoint: Checkpoint | None = None
+        self.checkpoint: Checkpoint = Checkpoint.empty()
         self.accuracy: float = 0.0
         self.stop_accuracy: int = STOP_ACCURACY
         self.chunk_size: int = 1
-        self.last_checkpoint_location: CheckpointLocation | None = None
+        self.last_checkpoint_location: CheckpointLocation = CheckpointLocation.empty()
         self.model_init_fn: Callable[
             [device],
             tuple[nn.Module, optim.Optimizer],
@@ -70,9 +70,6 @@ class TrialState:
         )
 
     def update_checkpoint(self, model: nn.Module, optimizer: optim.Optimizer) -> None:
-        if self.checkpoint is None:
-            self.checkpoint = Checkpoint({}, {})
-
         self.checkpoint.model_state_dict = model.cpu().state_dict()
         optimizer_state_dict = optimizer.state_dict()
 
@@ -97,7 +94,7 @@ class TrialState:
     @property
     def snapshot(self) -> "TrialState":
         new_trial = copy.copy(self)
-        new_trial.checkpoint = None
+        new_trial.checkpoint = Checkpoint.empty()
         return new_trial
 
     def set_chunk_size(self, chunk_size: int) -> None:

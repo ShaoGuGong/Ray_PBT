@@ -105,13 +105,13 @@ def cifar10_data_loader_factory(
 
 def resnet18_init_fn(
     hyperparameter: Hyperparameter,
-    checkpoint: Checkpoint | None,
+    checkpoint: Checkpoint,
     device: torch.device,
 ) -> tuple[nn.Module, optim.Optimizer]:
     model = models.resnet18()
     model.fc = nn.Linear(model.fc.in_features, 10)
 
-    if checkpoint is None:
+    if checkpoint.is_empty():
         model.to(device)
         optimizer = optim.SGD(
             model.parameters(),

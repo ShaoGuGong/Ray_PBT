@@ -14,7 +14,6 @@ from .config import (
 )
 from .trial_state import TrialState
 from .utils import (
-    Accuracy,
     Checkpoint,
     DataloaderFactory,
     TrainStepFunction,
@@ -45,19 +44,11 @@ class WorkerLoggerFormatter(logging.Formatter):
             str: 格式化後的日誌訊息。
         """
 
-        worker_type = getattr(record, "worker_type", WorkerType.CPU)
-        match worker_type:
-            case WorkerType.GPU:
-                record.worker_type = "GPU"
-            case WorkerType.CPU:
-                record.worker_type = "CPU"
-
-        record.worker_id = getattr(record, "worker_id", "N/A")
         record.trial_id = getattr(record, "trial_id", "N/A")
         return super().format(record)
 
 
-def get_worker_logger(worker_id: int, worker_type: WorkerType) -> logging.LoggerAdapter:
+def get_worker_logger(worker_id: int, worker_type: WorkerType) -> logging.Logger:
     """
     建立並回傳指定 worker_id 的 logger, 支援終端輸出與檔案寫入。
 
@@ -76,9 +67,15 @@ def get_worker_logger(worker_id: int, worker_type: WorkerType) -> logging.Logger
     if not logger.handlers:
         logger.setLevel(logging.DEBUG)
 
+        match worker_type:
+            case WorkerType.GPU:
+                worker_type_str = "GPU"
+            case WorkerType.CPU:
+                worker_type_str = "CPU"
+
         formatter = WorkerLoggerFormatter(
-            "[%(asctime)s] %(levelname)s %(worker_type)s "
-            "WORKER_ID: %(worker_id)s TRIAL_ID: %(trial_id)s -- %(message)s",
+            f"[%(asctime)s] %(levelname)s {worker_type_str} "
+            f"WORKER_ID: {worker_id} TRIAL_ID: %(trial_id)s -- %(message)s",
         )
 
         stream_handler = logging.StreamHandler()
@@ -91,10 +88,7 @@ def get_worker_logger(worker_id: int, worker_type: WorkerType) -> logging.Logger
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
 
-    return logging.LoggerAdapter(
-        logger,
-        {"worker_id": worker_id, "worker_type": worker_type},
-    )
+    return logger
 
 
 @ray.remote
@@ -141,6 +135,51 @@ class Worker:
         self.saved_checkpoint: dict[int, Checkpoint] = {}
         self.logger.info("初始化完成")
 
+    def trial_load_checkpoint(self, trial_state: TrialState) -> None:
+        if trial_state.last_checkpoint_location.worker_id:
+            if trial_state.last_checkpoint_location.worker_id == self.worker_state.id:
+                trial_state.checkpoint = self.get_checkpoint(trial_state.id)
+            else:
+                pass
+
+    def save_checkpoint(self, trial_state: TrialState) -> None:
+        if trial_state.checkpoint.is_empty():
+            self.log("warning", "Checkpoint 為空", trial_id=trial_state.id)
+            return
+
+        self.saved_checkpoint[trial_state.id] = trial_state.checkpoint
+
+    def get_checkpoint(self, trial_id: int) -> Checkpoint:
+        """
+        取得指定試驗的檢查點。
+
+        Args:
+            trial_id (int): 試驗 ID。
+        """
+        return self.saved_checkpoint.get(trial_id, Checkpoint.empty())
+
+    def pop_checkpoint(self, trial_id: int) -> Checkpoint:
+        """
+        取得並移除指定試驗的檢查點。
+
+        Args:
+            trial_id (int): 試驗 ID。
+        """
+        return self.saved_checkpoint.pop(trial_id, Checkpoint.empty())
+
+    def remove_chekcpoint(self, trial_id: int) -> None:
+        """
+        移除指定試驗的檢查點。
+
+        Args:
+            trial_id (int): 試驗 ID。
+        """
+        if trial_id in self.saved_checkpoint:
+            self.saved_checkpoint.pop(trial_id)
+            self.log("info", f"已移除 Trial {trial_id} 的檢查點", trial_id=trial_id)
+        else:
+            self.log("warning", f"Trial {trial_id} 的檢查點不存在", trial_id=trial_id)
+
     def get_active_trials_nums(self) -> int:
         """
         取得目前活躍試驗的數量。
@@ -161,12 +200,6 @@ class Worker:
             int: 可分配試驗的插槽數。
         """
         return self.worker_state.max_trials - len(self.active_trials)
-
-    def get_saved_checkpoint(self, trial_id: int) -> Checkpoint | None:
-        return self.saved_checkpoint.get(trial_id, None)
-
-    def pop_saved_checkpoint(self, trial_id: int) -> Checkpoint | None:
-        return self.saved_checkpoint.pop(trial_id, None)
 
     def send_signal(self, trial_id: int) -> None:
         if trial_id not in self.active_trials:
@@ -200,6 +233,7 @@ class Worker:
                 key=lambda x: x.iteration,
                 default=None,
             )
+
             if trial_state is None:
                 continue
 
@@ -208,13 +242,14 @@ class Worker:
                 f"開始訓練, chunk_size: {trial_state.chunk_size}",
                 trial_id=trial_state.id,
             )
-            self.log("debug", f"{torch.cuda.is_available()=}")
 
             hyper = trial_state.hyperparameter
+
             train_loader, test_loader, _ = self.dataloader_factory(
                 hyper.batch_size,
-                num_workers=min(4, self.worker_state.num_cpus),
+                num_workers=0,
             )
+
             model, optimizer = trial_state.model_init_fn(self.device)
 
             for _ in range(trial_state.chunk_size):
@@ -228,10 +263,6 @@ class Worker:
                         | TrialStatus.INTERRUPTED
                     ):
                         trial_state.update_checkpoint(model, optimizer)
-                        if trial_state.checkpoint:
-                            self.saved_checkpoint[trial_state.id] = (
-                                trial_state.checkpoint
-                            )
                         self.tuner.submit_trial.remote(trial_state)  # type: ignore[reportGeneralTypeIssues]
                         self.active_trials.pop(trial_state.id)
                         break
@@ -242,8 +273,6 @@ class Worker:
             if trial_state.status == TrialStatus.RUNNING:
                 trial_state.set_pause()
                 trial_state.update_checkpoint(model, optimizer)
-                if trial_state.checkpoint:
-                    self.saved_checkpoint[trial_state.id] = trial_state.checkpoint
                 self.tuner.submit_trial.remote(trial_state)
                 self.active_trials.pop(trial_state.id)
 
@@ -326,7 +355,7 @@ class Worker:
 
         return trial_state
 
-    def test(self, model: nn.Module, test_loader: DataLoader) -> Accuracy:
+    def test(self, model: nn.Module, test_loader: DataLoader) -> float:
         """
         使用測試資料對模型進行測試並回傳準確率。
 
@@ -361,7 +390,7 @@ class Worker:
             dict: 包含 worker ID 與對應日誌內容的字典。
         """
         log_dir = None
-        for handler in self.logger.logger.handlers:
+        for handler in self.logger.handlers:
             if isinstance(handler, logging.FileHandler):
                 log_dir = handler.baseFilename
                 break
@@ -475,7 +504,6 @@ def generate_all_workers(
                         worker_type=WorkerType.CPU,
                     ),
                 )
-
             visited_address.add(node_address)
 
     print(*worker_states, sep="\n")  # noqa: T201

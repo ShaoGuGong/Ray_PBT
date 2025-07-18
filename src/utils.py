@@ -2,11 +2,12 @@ import logging
 import random
 import time
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import reduce, wraps
-from typing import Any, ParamSpec, Protocol, TypeVar
+from typing import ParamSpec, Protocol, TypeVar
 
 import ray
 from ray.actor import ActorHandle
@@ -114,22 +115,38 @@ class Checkpoint:
     model_state_dict: dict
     optimizer_state_dict: dict
 
+    @classmethod
+    def empty(cls) -> "Checkpoint":
+        return cls(model_state_dict={}, optimizer_state_dict={})
+
+    def is_empty(self) -> bool:
+        return not self.model_state_dict and not self.optimizer_state_dict
+
 
 @dataclass
 class CheckpointLocation:
-    worker_id: int
-    worker_reference: ActorHandle
+    worker_id: int | None
+    worker_reference: ActorHandle | None
+
+    @classmethod
+    def empty(cls) -> "CheckpointLocation":
+        return cls(worker_id=None, worker_reference=None)
+
+    def is_empty(self) -> bool:
+        return self.worker_id is None and self.worker_reference is None
 
 
 # ╭──────────────────────────────────────────────────────────╮
 # │                       Type Define                        │
 # ╰──────────────────────────────────────────────────────────╯
 
-Accuracy = float
+
+P = ParamSpec("P")
+R = TypeVar("R")
 
 
-class TrainStepFunction(Protocol):
-    def __call__(self, *args: Any, **kwargs: Any) -> None: ...
+class TrainStepFunction(Protocol[P]):
+    def __call__(self, *args: P.args, **kwargs: P.kwargs) -> None: ...
 
 
 class DataloaderFactory(Protocol):
@@ -144,7 +161,7 @@ class ModelInitFunction(Protocol):
     def __call__(
         self,
         hyperparameter: Hyperparameter,
-        checkpoint: Checkpoint | None,
+        checkpoint: Checkpoint,
         device: device,
     ) -> tuple[nn.Module, optim.Optimizer]: ...
 
@@ -209,12 +226,24 @@ def unzip_file(zip_path: str, extract_to: str) -> None:
         zf.extractall(extract_to)
 
 
+@contextmanager
+def timing_block(
+    label: str,
+    logger: Callable[[str], None] | None = None,
+) -> Iterator[None]:
+    start = time.perf_counter()
+    yield
+    end = time.perf_counter()
+    msg = f"{label} 花費 {end - start:.6f} 秒"
+    if logger:
+        logger(msg)
+    else:
+        print(msg)  # noqa: T201
+
+
 # ╭──────────────────────────────────────────────────────────╮
 # │                        Decorators                        │
 # ╰──────────────────────────────────────────────────────────╯
-
-P = ParamSpec("P")
-R = TypeVar("R")
 
 
 def timer() -> Callable[[Callable[P, R]], Callable[P, R]]:
@@ -232,10 +261,10 @@ def timer() -> Callable[[Callable[P, R]], Callable[P, R]]:
                 if isinstance(logger, logging.Logger | logging.LoggerAdapter):
                     logger.info(message)
                 else:
-                    print(message)
+                    print(message)  # noqa: T201
 
             else:
-                print(message)
+                print(message)  # noqa: T201
             return result
 
         return wrapper
