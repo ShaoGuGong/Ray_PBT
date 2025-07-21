@@ -241,6 +241,20 @@ def timing_block(
         print(msg)  # noqa: T201
 
 
+def get_tensor_dict_size(state_dict: dict) -> int:
+    total = 0
+    for v in state_dict.values():
+        if isinstance(v, dict):
+            total += get_tensor_dict_size(v)
+        elif isinstance(v, list):
+            for item in v:
+                if isinstance(item, dict):
+                    total += get_tensor_dict_size(item)
+        elif hasattr(v, "numel") and hasattr(v, "element_size"):
+            total += v.numel() * v.element_size()
+    return total
+
+
 # ╭──────────────────────────────────────────────────────────╮
 # │                        Decorators                        │
 # ╰──────────────────────────────────────────────────────────╯

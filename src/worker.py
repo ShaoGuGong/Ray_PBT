@@ -135,13 +135,6 @@ class Worker:
         self.saved_checkpoint: dict[int, Checkpoint] = {}
         self.logger.info("初始化完成")
 
-    def trial_load_checkpoint(self, trial_state: TrialState) -> None:
-        if trial_state.last_checkpoint_location.worker_id:
-            if trial_state.last_checkpoint_location.worker_id == self.worker_state.id:
-                trial_state.checkpoint = self.get_checkpoint(trial_state.id)
-            else:
-                pass
-
     def save_checkpoint(self, trial_state: TrialState) -> None:
         if trial_state.checkpoint.is_empty():
             self.log("warning", "Checkpoint 為空", trial_id=trial_state.id)
@@ -209,6 +202,35 @@ class Worker:
         self.interrupt_set.add(trial_id)
 
     @timer()
+    def _trial_load_checkpoint(self, trial_state: TrialState) -> None:
+        """
+        嘗試從檢查點載入試驗狀態。
+
+        Args:
+            trial_state (TrialState): 試驗狀態。
+        """
+        if trial_state.last_checkpoint_location.is_empty():
+            return
+
+        if trial_state.last_checkpoint_location.worker_id in self.saved_checkpoint:
+            checkpoint = self.get_checkpoint(trial_state.id)
+            if not checkpoint.is_empty():
+                trial_state.checkpoint = checkpoint
+                self.log(
+                    "info",
+                    "載入 Checkpoint",
+                    trial_id=trial_state.id,
+                )
+            else:
+                self.log(
+                    "warning",
+                    "Checkpoint 為空",
+                    trial_id=trial_state.id,
+                )
+        else:
+            trial_state.remove_remote_checkpoint()
+
+    @timer()
     def assign_trial(self, trial_state: TrialState) -> None:
         """
         將試驗分配給該 worker 並開始訓練。
@@ -223,6 +245,7 @@ class Worker:
             return
 
         self.active_trials[trial_state.id] = trial_state
+        self._trial_load_checkpoint(trial_state)
         trial_state.update_worker_state(self.worker_state)
         self.log("info", f"Running Trials: {list(self.active_trials)}")
 
@@ -263,6 +286,8 @@ class Worker:
                         | TrialStatus.INTERRUPTED
                     ):
                         trial_state.update_checkpoint(model, optimizer)
+                        self.save_checkpoint(trial_state)
+
                         self.tuner.submit_trial.remote(trial_state)  # type: ignore[reportGeneralTypeIssues]
                         self.active_trials.pop(trial_state.id)
                         break
@@ -272,7 +297,10 @@ class Worker:
 
             if trial_state.status == TrialStatus.RUNNING:
                 trial_state.set_pause()
+
                 trial_state.update_checkpoint(model, optimizer)
+                self.save_checkpoint(trial_state)
+
                 self.tuner.submit_trial.remote(trial_state)
                 self.active_trials.pop(trial_state.id)
 

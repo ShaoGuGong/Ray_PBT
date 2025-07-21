@@ -80,14 +80,28 @@ class TrialState:
         self.checkpoint.optimizer_state_dict = optimizer_state_dict
 
     def get_remote_checkpoint(self) -> Checkpoint:
+        if self.last_checkpoint_location.is_empty():
+            return Checkpoint.empty()
+
         return ray.get(
-            self.last_checkpoint_location.worker_reference.get_saved_checkpoint.remote(  # type:ignore[reportGeneralTypeIssues]
+            self.last_checkpoint_location.worker_reference.get_checkpoint.remote(  # type:ignore[reportGeneralTypeIssues]
                 self.id,
             ),
         )
 
     def pop_remote_checkpoint(self) -> None:
-        self.last_checkpoint_location.worker_reference.pop_saved_checkpoint.remote(  # type:ignore[reportGeneralTypeIssues]
+        if self.last_checkpoint_location.is_empty():
+            return
+        ray.get(
+            self.last_checkpoint_location.worker_reference.pop_checkpoint.remote(  # type:ignore[reportGeneralTypeIssues]
+                self.id,
+            ),
+        )
+
+    def remove_remote_checkpoint(self) -> None:
+        if self.last_checkpoint_location.is_empty():
+            return
+        self.last_checkpoint_location.worker_reference.pop_checkpoint.remote(  # type:ignore[reportGeneralTypeIssues]
             self.id,
         )
 

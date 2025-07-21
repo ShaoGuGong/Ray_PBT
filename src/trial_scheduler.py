@@ -2,19 +2,19 @@ import logging
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
 
 import ray
 from ray import ObjectRef
 from ray.actor import ActorHandle
 
 from .trial_state import TrialManager, TrialState
-from .utils import WorkerType, colored_progress_bar
+from .utils import WorkerType, colored_progress_bar, timing_block
 
 
 def cpu_scheduling(
     trial_state: TrialState,
     cpu_workers: dict[int, ActorHandle],
+    logger: logging.Logger | None = None,
 ) -> bool:
     available_futures: list = [
         worker.get_available_slots.remote() for worker in cpu_workers.values()
@@ -37,7 +37,20 @@ def cpu_scheduling(
     trial_state.worker_id = worker_id
     trial_state.worker_type = WorkerType.CPU
     trial_state.set_running()
-    ray.get(worker.assign_trial.remote(trial_state))  # type: ignore[reportGeneralTypeIssues]
+
+    if worker_id == trial_state.last_checkpoint_location.worker_id:
+        with timing_block(
+            f"Assigning Trial {trial_state.id} snapshot to CPU Worker {worker_id}",
+            logger=logger.info if logger else None,
+        ):
+            ray.get(worker.assign_trial.remote(trial_state.snapshot))  # type: ignore[reportGeneralTypeIssues]
+
+    else:
+        with timing_block(
+            f"Assigning Trial {trial_state.id} to CPU Worker {worker_id}",
+            logger=logger.info if logger else None,
+        ):
+            ray.get(worker.assign_trial.remote(trial_state))  # type: ignore[reportGeneralTypeIssues]
 
     return True
 
@@ -45,6 +58,7 @@ def cpu_scheduling(
 def gpu_scheduling(
     trial_state: TrialState,
     gpu_workers: dict[int, ActorHandle],
+    logger: logging.Logger | None = None,
 ) -> bool:
     available_futures = [
         worker.get_available_slots.remote() for worker in gpu_workers.values()
@@ -67,16 +81,27 @@ def gpu_scheduling(
     trial_state.worker_id = worker_id
     trial_state.worker_type = WorkerType.GPU
     trial_state.set_running()
-    ray.get(worker.assign_trial.remote(trial_state))  # type: ignore[reportGeneralTypeIssues]
+
+    if worker_id == trial_state.last_checkpoint_location.worker_id:
+        with timing_block(
+            f"Assigning Trial {trial_state.id} snapshot to GPU Worker {worker_id}",
+            logger=logger.info if logger else None,
+        ):
+            ray.get(worker.assign_trial.remote(trial_state.snapshot))  # type: ignore[reportGeneralTypeIssues]
+    else:
+        with timing_block(
+            f"Assigning Trial {trial_state.id} to GPU Worker {worker_id}",
+            logger=logger.info if logger else None,
+        ):
+            ray.get(worker.assign_trial.remote(trial_state))  # type: ignore[reportGeneralTypeIssues]
+
     return True
 
 
 def gpu_stealing_strategy(
     cpu_workers: list[ActorHandle],
-    **kargs: Any,
+    logger: logging.Logger,
 ) -> ObjectRef | None:
-    logger = kargs["logger"]
-
     available_futures: list = [
         worker.get_active_trials.remote() for worker in cpu_workers
     ]
@@ -205,7 +230,7 @@ class TrialScheduler:
                 return
 
             trial_state.set_chunk_size(3)
-            if cpu_scheduling(trial_state, self.cpu_workers):
+            if cpu_scheduling(trial_state, self.cpu_workers, self.logger):
                 self.trial_manager.run_trial(trial_state.id)
                 self.trial_manager.update_trial(trial_state)
 
@@ -217,7 +242,7 @@ class TrialScheduler:
         chunk_size = self.trial_manager.get_chunk_size(trial_state.iteration)  # type: ignore[reportGeneralTypeIssues]
 
         trial_state.set_chunk_size(chunk_size)
-        if gpu_scheduling(trial_state, self.gpu_workers):
+        if gpu_scheduling(trial_state, self.gpu_workers, self.logger):
             self.trial_manager.run_trial(trial_state.id)
             self.trial_manager.update_trial(trial_state)
 
