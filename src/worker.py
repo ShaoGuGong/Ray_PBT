@@ -1,6 +1,5 @@
 import logging
 import random
-from itertools import count
 from pathlib import Path
 
 import ray
@@ -136,6 +135,7 @@ class Worker:
         self.logger.info("初始化完成")
 
     def save_checkpoint(self, trial_state: TrialState) -> None:
+        self.log("info", "儲存 Checkpoint", trial_id=trial_state.id)
         if trial_state.checkpoint.is_empty():
             self.log("warning", "Checkpoint 為空", trial_id=trial_state.id)
             return
@@ -149,6 +149,7 @@ class Worker:
         Args:
             trial_id (int): 試驗 ID。
         """
+        self.log("info", "取得 Checkpoint", trial_id=trial_id)
         return self.saved_checkpoint.get(trial_id, Checkpoint.empty())
 
     def pop_checkpoint(self, trial_id: int) -> Checkpoint:
@@ -158,6 +159,7 @@ class Worker:
         Args:
             trial_id (int): 試驗 ID。
         """
+        self.log("info", "取得並移除 Checkpoint", trial_id=trial_id)
         return self.saved_checkpoint.pop(trial_id, Checkpoint.empty())
 
     def remove_chekcpoint(self, trial_id: int) -> None:
@@ -213,18 +215,19 @@ class Worker:
             return
 
         if trial_state.last_checkpoint_location.worker_id in self.saved_checkpoint:
+            self.log("info", "載入本地 checkpoint", trial_id=trial_state.id)
             checkpoint = self.get_checkpoint(trial_state.id)
             if not checkpoint.is_empty():
                 trial_state.checkpoint = checkpoint
                 self.log(
                     "info",
-                    "載入 Checkpoint",
+                    "載入成功",
                     trial_id=trial_state.id,
                 )
             else:
                 self.log(
                     "warning",
-                    "Checkpoint 為空",
+                    "載入失敗, Checkpoint 為空",
                     trial_id=trial_state.id,
                 )
         else:
@@ -244,10 +247,10 @@ class Worker:
         if len(self.active_trials) >= self.worker_state.max_trials:
             return
 
-        self.active_trials[trial_state.id] = trial_state
         self._trial_load_checkpoint(trial_state)
+        self.save_checkpoint(trial_state)
         trial_state.update_worker_state(self.worker_state)
-        self.log("info", f"Running Trials: {list(self.active_trials)}")
+        self.active_trials[trial_state.id] = trial_state
 
     def run(self) -> None:
         while not self.is_stop:
@@ -470,85 +473,3 @@ class Worker:
 
     def stop(self) -> None:
         self.is_stop = True
-
-
-def generate_all_workers(
-    tuner: ActorHandle,
-    train_step: TrainStepFunction,
-    dataloader_factory: DataloaderFactory,
-) -> dict[int, ActorHandle]:
-    """
-    根據 Ray 叢集的節點資源建立所有 Worker。
-
-    Args:
-        tuner (ActorHandle): 接收試驗結果的 Actor。
-        train_step (TrainStepFunction): 訓練步驟函式。
-
-    Returns:
-        List[ActorHandle]: 建立的 Worker Actor 清單。
-    """
-
-    visited_address = set()
-    worker_states: list[WorkerState] = []
-    count_gen = count(start=0, step=1)
-    head_node_address = get_head_node_address()
-
-    for node in ray.nodes():
-        node_address = node["NodeManagerAddress"]
-
-        if node["Alive"]:
-            if node_address in visited_address:
-                continue
-
-            resource = node["Resources"]
-
-            gpus = resource.get("GPU", 0)
-            cpus = resource.get("CPU", 1)
-
-            if "GPU" in resource:
-                cpus -= 1
-                worker_states.append(
-                    WorkerState(
-                        id=next(count_gen),
-                        num_cpus=1,
-                        num_gpus=gpus,
-                        node_name=f"node:{node_address}",
-                        max_trials=3,
-                        worker_type=WorkerType.GPU,
-                    ),
-                )
-
-            if "CPU" in resource:
-                if node_address == head_node_address:
-                    cpus -= 1
-
-                worker_states.append(
-                    WorkerState(
-                        id=next(count_gen),
-                        num_cpus=cpus,
-                        num_gpus=0,
-                        node_name=f"node:{node_address}",
-                        max_trials=1,
-                        worker_type=WorkerType.CPU,
-                    ),
-                )
-            visited_address.add(node_address)
-
-    print(*worker_states, sep="\n")  # noqa: T201
-    workers: dict[int, ActorHandle] = {}
-
-    for worker_state in worker_states:
-        workers[worker_state.id] = Worker.options(  # type: ignore[reportGeneralTypeIssues]
-            max_concurrency=worker_state.max_trials + 3,
-            name=f"worker-{worker_state.id}",
-            num_cpus=worker_state.num_cpus,
-            num_gpus=worker_state.num_gpus,
-            resources={worker_state.node_name: 0.01},
-        ).remote(
-            worker_state,
-            train_step,
-            tuner,
-            dataloader_factory,
-        )
-
-    return workers
