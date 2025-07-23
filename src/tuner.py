@@ -11,7 +11,7 @@ import ray
 from .trial_manager import TrialManager
 from .trial_scheduler import TrialScheduler
 from .trial_state import TrialState
-from .utils import DataloaderFactory, TrainStepFunction, TrialStatus
+from .utils import DataloaderFactory, TrainStepFunction, TrialStatus, timer
 from .worker_manager import WorkerManager
 
 
@@ -77,14 +77,17 @@ class Tuner:
         end = time.time()
         self.logger.info("訓練總時長: %.2f 秒", end - start)
         self.scheduler.get_workers_logs()
+        self.logger.info("Assign: %d", self.worker_manager.assign_count["assign"])
+        self.logger.info("Locality: %d", self.worker_manager.assign_count["locality"])
 
     def update_trial(self, trial_state: TrialState) -> None:
         self.trial_manager.update_trial(trial_state)
         if self.trial_manager.history_best:
             self.logger.info(
-                "History best accuracy: %.2f ,%s",
+                "History best accuracy: %.2f ,%s, iteration: %d",
                 self.trial_manager.history_best.accuracy,
                 str(self.trial_manager.history_best.hyperparameter),
+                self.trial_manager.history_best.iteration,
             )
 
     def get_mutation_baseline(self) -> float:
@@ -93,6 +96,7 @@ class Tuner:
     def get_chunk_size(self, iteration: int) -> int:
         return self.trial_manager.get_chunk_size(iteration)
 
+    @timer()
     def mutation(self, trial_state: TrialState) -> TrialState:
         self.logger.info(
             "Trial %d: 執行mutation, 原始超參數: %s",
@@ -121,16 +125,6 @@ class Tuner:
         status = trial_state.status
 
         match status:
-            case TrialStatus.INTERRUPTED:
-                trial_state.set_pending()
-                self.trial_manager.transition_to_pending(trial_state.id)
-                self.trial_manager.update_trial(trial_state)
-                self.logger.info(
-                    "🔃 Worker %2d 回傳已中斷 Trial %2d",
-                    trial_state.worker_id,
-                    trial_state.id,
-                )
-
             case TrialStatus.PAUSE:
                 trial_state.set_pending()
                 self.trial_manager.transition_to_pending(trial_state.id)
@@ -177,6 +171,8 @@ class Tuner:
 
         trial_state.worker_id = -1
         trial_state.worker_type = None
+
+        self.worker_manager.release_slots(worker_id, trial_state.id)
 
     def get_zipped_log(self) -> bytes:
         log_dir = None

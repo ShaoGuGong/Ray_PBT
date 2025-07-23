@@ -1,3 +1,4 @@
+import logging
 from dataclasses import dataclass, field
 from itertools import count
 
@@ -25,6 +26,10 @@ class WorkerEntry:
     def available_slots(self) -> int:
         return self.state.max_trials - len(self.active_trials)
 
+    @property
+    def id(self) -> int:
+        return self.state.id
+
 
 class WorkerManager:
     def __init__(
@@ -34,6 +39,7 @@ class WorkerManager:
         dataloader_factory: DataloaderFactory,
     ) -> None:
         self.workers: dict[int, WorkerEntry] = {}
+        self.assign_count: dict[str, int] = {"assign": 0, "locality": 0}
 
         worker_states = generate_all_worker_states()
 
@@ -64,7 +70,7 @@ class WorkerManager:
             for worker_id, worker_entry in self.workers.items()
             if worker_entry.state.worker_type == WorkerType.GPU
         }
-        [self.workers[worker_id].ref.start.remote() for worker_id in self.workers]
+        [self.workers[worker_id].ref.run.remote() for worker_id in self.workers]
 
     def get_avaiable_cpu_workers(self) -> list[WorkerEntry]:
         return [
@@ -80,18 +86,37 @@ class WorkerManager:
             if worker_entry.available_slots > 0
         ]
 
-    def assign_trial_to_worker(self, worker_id: int, trial: TrialState) -> None:
+    def assign_trial_to_worker(
+        self,
+        worker_id: int,
+        trial: TrialState,
+        logger: logging.Logger | None = None,
+    ) -> None:
         entry = self.workers.get(worker_id, None)
         if entry is None:
             msg = f"Worker {worker_id} 不存在."
             raise ValueError(msg)
 
         entry.active_trials.append(trial.id)
+        self.assign_count["assign"] += 1
 
         if trial.last_checkpoint_location.worker_id == worker_id:
-            entry.ref.assign_trial.remote(trial.snapshot)
+            if logger:
+                logger.info(
+                    "分配 Trial %d snapshot 到 Worker %d",
+                    trial.id,
+                    worker_id,
+                )
+            self.assign_count["locality"] += 1
+            entry.ref.assign_trial.remote(trial.snapshot)  # type: ignore[reportGeneralTypeIssues]
         else:
-            entry.ref.assign_trial.remote(trial)
+            if logger:
+                logger.info(
+                    "分配 Trial %d 到 Worker %d",
+                    trial.id,
+                    worker_id,
+                )
+            entry.ref.assign_trial.remote(trial)  # type: ignore[reportGeneralTypeIssues]
 
     def release_slots(self, worker_id: int, trial_id: int) -> None:
         entry = self.workers.get(worker_id, None)
@@ -147,7 +172,7 @@ def generate_all_worker_states() -> list[WorkerState]:
 
             if "CPU" in resource:
                 if node_address == head_node_address:
-                    cpus -= 1
+                    cpus -= 2
 
                 worker_states.append(
                     WorkerState(

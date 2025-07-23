@@ -19,7 +19,6 @@ from .utils import (
     TrialStatus,
     WorkerState,
     WorkerType,
-    get_head_node_address,
     timer,
 )
 
@@ -134,6 +133,18 @@ class Worker:
         self.saved_checkpoint: dict[int, Checkpoint] = {}
         self.logger.info("初始化完成")
 
+    def stealing_trial(self, trial_id: int) -> None:
+        trial_state = self.active_trials.pop(trial_id, None)
+
+        if trial_state is None:
+            self.log("info", "嘗試偷取的 Trial 不存在", trial_id=trial_id)
+            return
+
+        self.interrupt_set.add(trial_id)
+        trial_state.set_pause()
+
+        self.tuner.submit_trial.remote(self.worker_state.id, trial_state)
+
     def save_checkpoint(self, trial_state: TrialState) -> None:
         self.log("info", "儲存 Checkpoint", trial_id=trial_state.id)
         if trial_state.checkpoint.is_empty():
@@ -174,27 +185,6 @@ class Worker:
             self.log("info", f"已移除 Trial {trial_id} 的檢查點", trial_id=trial_id)
         else:
             self.log("warning", f"Trial {trial_id} 的檢查點不存在", trial_id=trial_id)
-
-    def get_active_trials_nums(self) -> int:
-        """
-        取得目前活躍試驗的數量。
-
-        Returns:
-            int: 活躍試驗數量。
-        """
-        return len(self.active_trials)
-
-    def get_active_trials(self) -> list[TrialState]:
-        return list(self.active_trials.values())
-
-    def get_available_slots(self) -> int:
-        """
-        取得可供分配的新試驗插槽數。
-
-        Returns:
-            int: 可分配試驗的插槽數。
-        """
-        return self.worker_state.max_trials - len(self.active_trials)
 
     def send_signal(self, trial_id: int) -> None:
         if trial_id not in self.active_trials:
@@ -249,19 +239,21 @@ class Worker:
 
         self._trial_load_checkpoint(trial_state)
         self.save_checkpoint(trial_state)
-        trial_state.update_worker_state(self.worker_state)
         self.active_trials[trial_state.id] = trial_state
 
     def run(self) -> None:
         while not self.is_stop:
             trial_state = min(
-                self.get_active_trials(),
+                self.active_trials.values(),
                 key=lambda x: x.iteration,
                 default=None,
             )
 
             if trial_state is None:
                 continue
+
+            trial_state.set_running()
+            self.tuner.update_trial.remote(trial_state)  # type: ignore[reportGeneralTypeIssues]
 
             self.log(
                 "info",
@@ -278,25 +270,39 @@ class Worker:
 
             model, optimizer = trial_state.model_init_fn(self.device)
 
-            for _ in range(trial_state.chunk_size):
+            for index in range(trial_state.chunk_size):
                 self.train(trial_state, model, optimizer, train_loader, test_loader)
 
+                if trial_state.id in self.interrupt_set:
+                    break
+
                 match trial_state.status:
-                    case (
-                        TrialStatus.TERMINATE
-                        | TrialStatus.PAUSE
-                        | TrialStatus.NEED_MUTATION
-                        | TrialStatus.INTERRUPTED
-                    ):
+                    case TrialStatus.TERMINATE:
+                        trial_state.update_checkpoint(model, optimizer)
+
+                        self.tuner.submit_trial.remote(
+                            self.worker_state.id,
+                            trial_state,
+                        )  # type: ignore[reportGeneralTypeIssues]
+                        self.active_trials.pop(trial_state.id)
+                        break
+                    case TrialStatus.PAUSE | TrialStatus.NEED_MUTATION:
                         trial_state.update_checkpoint(model, optimizer)
                         self.save_checkpoint(trial_state)
 
-                        self.tuner.submit_trial.remote(trial_state)  # type: ignore[reportGeneralTypeIssues]
+                        self.tuner.submit_trial.remote(
+                            self.worker_state.id,
+                            trial_state,
+                        )  # type: ignore[reportGeneralTypeIssues]
                         self.active_trials.pop(trial_state.id)
                         break
 
                     case TrialStatus.RUNNING:
-                        self.tuner.update_trial.remote(trial_state)  # type: ignore[reportGeneralTypeIssues]
+                        if index != trial_state.chunk_size - 1:
+                            self.tuner.update_trial.remote(trial_state)  # type: ignore[reportGeneralTypeIssues]
+
+            if trial_state.id in self.interrupt_set:
+                continue
 
             if trial_state.status == TrialStatus.RUNNING:
                 trial_state.set_pause()
@@ -304,16 +310,8 @@ class Worker:
                 trial_state.update_checkpoint(model, optimizer)
                 self.save_checkpoint(trial_state)
 
-                self.tuner.submit_trial.remote(trial_state)
+                self.tuner.submit_trial.remote(self.worker_state.id, trial_state)
                 self.active_trials.pop(trial_state.id)
-
-    def _check_and_handle_trial_condition(self, trial_state: TrialState) -> bool:
-        if trial_state.id in self.interrupt_set:
-            trial_state.set_interrupted()
-            self.interrupt_set.remove(trial_state.id)
-            return True
-
-        return False
 
     def train(
         self,
@@ -335,11 +333,11 @@ class Worker:
         for _ in range(
             self.mutation_iteration - trial_state.iteration % self.mutation_iteration,
         ):
+            if trial_state.id in self.interrupt_set:
+                return trial_state
+
             if trial_state.iteration >= trial_state.stop_iteration:
                 trial_state.set_terminated()
-                break
-
-            if self._check_and_handle_trial_condition(trial_state):
                 break
 
             self.train_step(
@@ -352,9 +350,6 @@ class Worker:
 
             trial_state.iteration += 1
             trial_state.device_iteration_count[self.worker_state.worker_type] += 1
-
-        if trial_state.status == TrialStatus.INTERRUPTED:
-            return trial_state
 
         trial_state.accuracy = self.test(model, test_loader)
 
@@ -458,18 +453,6 @@ class Worker:
         if level == "error":
             self.logger.error(message, extra=extra)
             return
-
-    def get_id(self) -> int:
-        return self.worker_state.id
-
-    def get_worker_type(self) -> WorkerType:
-        """
-        回傳 worker 類型 (CPU/GPU) 。
-
-        Returns:
-            WorkerType: Worker 類型。
-        """
-        return self.worker_state.worker_type
 
     def stop(self) -> None:
         self.is_stop = True

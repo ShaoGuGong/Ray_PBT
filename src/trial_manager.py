@@ -1,5 +1,6 @@
 import heapq
 import math
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .config import (
@@ -7,7 +8,7 @@ from .config import (
     TRIAL_PROGRESS_OUTPUT_PATH,
 )
 from .trial_state import TrialState
-from .utils import WorkerType
+from .utils import TrialStatus, WorkerType
 
 
 class TrialManager:
@@ -16,6 +17,7 @@ class TrialManager:
         self.pending_ids = {trial.id for trial in trial_states}
         self.running_ids = set()
         self.completed_ids = set()
+        self.waiting_ids = set()
         self.history_best: TrialState | None = None
 
         self._mutation_baseline: float = 0.0
@@ -24,13 +26,22 @@ class TrialManager:
     def add_trial(self, trial_state: TrialState) -> None:
         self.all_trials[trial_state.id] = trial_state
 
-    def transition_to_running(self, trial_id: int) -> None:
+    def transition_to_waiting(self, trial_id: int) -> None:
         trial = self.all_trials.get(trial_id, None)
         if trial is None:
             msg = f"Trial id {trial_id} not found"
             raise ValueError(msg)
 
         self.pending_ids.discard(trial_id)
+        self.waiting_ids.add(trial_id)
+
+    def transition_to_running(self, trial_id: int) -> None:
+        trial = self.all_trials.get(trial_id, None)
+        if trial is None:
+            msg = f"Trial id {trial_id} not found"
+            raise ValueError(msg)
+
+        self.waiting_ids.discard(trial_id)
         self.running_ids.add(trial_id)
 
     def transition_to_pending(self, trial_id: int) -> None:
@@ -156,11 +167,10 @@ class TrialManager:
             raise ValueError(msg)
 
         if (
-            not trial_state.last_checkpoint_location.is_empty()
-            and self.all_trials[trial_state.id].last_checkpoint_location.worker_id
-            != trial_state.last_checkpoint_location.worker_id
+            trial_state.status == TrialStatus.RUNNING
+            and trial_state.id in self.waiting_ids
         ):
-            self.all_trials[trial_state.id].remove_remote_checkpoint()
+            self.transition_to_running(trial_state.id)
 
         self.all_trials[trial_state.id] = trial_state
 
@@ -170,6 +180,7 @@ class TrialManager:
         ):
             self.history_best = trial_state
 
+        self.maybe_update_mutation_baseline()
         self.display_trial_result()
 
     def is_finish(self) -> bool:
@@ -179,6 +190,13 @@ class TrialManager:
         self,
         output_path: Path = TRIAL_PROGRESS_OUTPUT_PATH,
     ) -> None:
+        literal_status = {
+            TrialStatus.RUNNING: f"\033[32m{TrialStatus.RUNNING:^11}\033[0m",
+            TrialStatus.PENDING: f"\033[33m{TrialStatus.PENDING:^11}\033[0m",
+            TrialStatus.WAITING: f"\033[34m{TrialStatus.WAITING:^11}\033[0m",
+            TrialStatus.FAILED: f"\033[31m{TrialStatus.FAILED:^11}\033[0m",
+            TrialStatus.TERMINATE: f"\033[90m{TrialStatus.TERMINATE:^11}\033[0m",
+        }
         try:
             with Path(output_path).open("w") as f:
                 f.write(
@@ -202,11 +220,18 @@ class TrialManager:
                     worker_id = ""
                     if i.worker_id != -1:
                         worker_id = i.worker_id
+                    status = literal_status.get(i.status, i.status)
                     f.write(
-                        f"┃{i.id:>4}┃{i.status:^11}┃{worker_id:>4}┃{worker_type:^6}┃{h.lr:>7.3f}┃{h.momentum:>10.3f}┃{h.batch_size:>6}┃{h.model_type:^11}┃{i.iteration:>7}┃{i.accuracy:>7.3f}┃\n",
+                        f"┃{i.id:>4}┃{status:^11}┃{worker_id:>4}┃{worker_type:^6}┃{h.lr:>7.3f}┃{h.momentum:>10.3f}┃{h.batch_size:>6}┃{h.model_type:^11}┃{i.iteration:>7}┃{i.accuracy:>7.3f}┃\n",
                     )
-                f.write(
-                    f"┗{'':━^4}┻{'':━^11}┻{'':━^4}┻{'':━^6}┻{'':━^7}┻{'':━^10}┻{'':━^6}┻{'':━^11}┻{'':━^7}┻{'':━^7}┛\n",
+                timestamp = (datetime.now(UTC) + timedelta(hours=8)).strftime(
+                    "%Y-%m-%d %H:%M:%S",
                 )
+
+                f.write(
+                    f"┗{'':━^4}┻{'':━^11}┻{'':━^4}┻{'':━^6}┻{'':━^7}┻{'':━^10}┻{'':━^6}┻{'':━^11}┻{'':━^7}┻{'':━^7}┛\n"
+                    f"{timestamp}\n",
+                )
+
         except Exception as e:  # noqa: BLE001
             print(f"{e}")  # noqa: T201

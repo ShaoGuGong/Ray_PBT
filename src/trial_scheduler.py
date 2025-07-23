@@ -5,12 +5,10 @@ from pathlib import Path
 
 import ray
 from ray import ObjectRef
-from ray.actor import ActorHandle
-
-from src.worker_manager import WorkerManager
 
 from .trial_manager import TrialManager
 from .utils import WorkerType, colored_progress_bar
+from .worker_manager import WorkerManager
 
 
 def gpu_scheduling(
@@ -24,6 +22,10 @@ def gpu_scheduling(
         return
 
     available_worker_entries = worker_manager.get_avaiable_gpu_workers()
+
+    if not available_worker_entries:
+        logger.info("沒有可用的 GPU worker")
+        return
 
     # 選擇擁有最多 slot 的 GPU worker 作為目標 worker
     selected_worker_entry = max(
@@ -40,7 +42,7 @@ def gpu_scheduling(
             t
             for t in trial_states
             if not t.last_checkpoint_location.is_empty()
-            and t.last_checkpoint_location.worker_id == selected_worker_entry.state.id
+            and t.last_checkpoint_location.worker_id == selected_worker_entry.id
         ),
         trial_states[0],  # 若無符合者, 則選第一個
     )
@@ -49,15 +51,15 @@ def gpu_scheduling(
     selected_trial.set_chunk_size(
         trial_manager.get_chunk_size(selected_trial.iteration),
     )
-    selected_trial.worker_id = selected_worker_entry.state.id
+    selected_trial.worker_id = selected_worker_entry.id
     selected_trial.worker_type = WorkerType.GPU
-    selected_trial.set_running()
+    selected_trial.set_waiting()
 
-    trial_manager.transition_to_running(selected_trial.id)
+    trial_manager.transition_to_waiting(selected_trial.id)
     trial_manager.update_trial(selected_trial)
 
     worker_manager.assign_trial_to_worker(
-        selected_worker_entry.state.id,
+        selected_worker_entry.id,
         selected_trial,
     )
 
@@ -75,6 +77,7 @@ def cpu_scheduling(
     available_worker_entries = worker_manager.get_avaiable_cpu_workers()
 
     if not available_worker_entries:
+        logger.info("沒有可用的 CPU worker")
         return
 
     # 選擇第一個可用的 worker
@@ -82,7 +85,7 @@ def cpu_scheduling(
 
     # 取得 iteration 較高的 Trials, 個數為 CPU 數
     trial_states = trial_manager.get_nlargest_iteration_trials(
-        len(worker_manager.cpu_workers) * 2,
+        int(len(worker_manager.cpu_workers) * 1.5),
     )
     trial_states = trial_states[len(trial_states) // 2 :]
 
@@ -92,49 +95,46 @@ def cpu_scheduling(
             t
             for t in trial_states
             if not t.last_checkpoint_location.is_empty()
-            and t.last_checkpoint_location.worker_id == selected_worker_entry.state.id
+            and t.last_checkpoint_location.worker_id == selected_worker_entry.id
         ),
         trial_states[-1],
     )
 
     # 設定 chunk_size(暫定為 2), 標記執行資訊
     selected_trial.set_chunk_size(2)
-    selected_trial.worker_id = selected_worker_entry.state.id
+    selected_trial.worker_id = selected_worker_entry.id
     selected_trial.worker_type = WorkerType.CPU
-    selected_trial.set_running()
+    selected_trial.set_waiting()
 
     # 更新 Trial 狀態至 running
-    trial_manager.transition_to_running(selected_trial.id)
+    trial_manager.transition_to_waiting(selected_trial.id)
     trial_manager.update_trial(selected_trial)
 
     worker_manager.assign_trial_to_worker(
-        selected_worker_entry.state.id,
+        selected_worker_entry.id,
         selected_trial,
     )
 
 
-def gpu_stealing_strategy(
-    cpu_workers: list[ActorHandle],
+def stealing_strategy(
+    worker_manager: WorkerManager,
+    trial_manager: TrialManager,
     logger: logging.Logger,
-) -> ObjectRef | None:
-    available_futures: list = [
-        worker.get_active_trials.remote() for worker in cpu_workers
-    ]
+) -> None:
+    logger.info("嘗試從 CPU Worker 偷取任務")
+    running_workers = (
+        worker_entry
+        for worker_entry in worker_manager.cpu_workers.values()
+        if worker_entry.available_slots == 0
+    )
 
-    running_cpu_workers = [
-        (worker, min(activate_trials, key=lambda x: x.iteration))
-        for worker, activate_trials in zip(
-            cpu_workers,
-            ray.get(available_futures),  # type:int[reportGeneralTypeIssues]
-            strict=True,
-        )
-        if len(activate_trials) > 0
-    ]
+    worker = next(running_workers, None)
+    if worker is None:
+        logger.info("沒有可用的 CPU Worker 來偷取任務")
+        return
 
-    if running_cpu_workers:
-        worker, trial_state = min(running_cpu_workers, key=lambda x: x[1].iteration)
-        logger.info("對 Trial %d 執行搶奪", trial_state.id)
-        ray.wait([worker.send_signal.remote(trial_state.id)], timeout=0.1)  # type: ignore[reportGeneralTypeIssues]
+    logger.info("嘗試從 CPU Worker %d 偷取任務", worker.id)
+    worker.ref.stealing_trial.remote(worker.active_trials[0])  # type: ignore[reportGeneralTypeIssues])
 
 
 def get_trial_scheduler_logger() -> logging.Logger:
@@ -215,7 +215,18 @@ class TrialScheduler:
         Returns:
             List[ObjectRef]: 當前正在運行的訓練任務列表。
         """
-        time.sleep(1)
+
+        if (
+            self.trial_manager.get_uncompleted_trial_num()
+            <= len(self.worker_manager.gpu_workers) * 3
+        ):
+            stealing_strategy(self.worker_manager, self.trial_manager, self.logger)
+        else:
+            if not self.trial_manager.pending_ids:
+                self.logger.info("沒有待分配的 Trial")
+                return
+            cpu_scheduling(self.trial_manager, self.worker_manager, self.logger)
+        gpu_scheduling(self.trial_manager, self.worker_manager, self.logger)
 
     def run(self) -> None:
         """
@@ -227,7 +238,8 @@ class TrialScheduler:
         update_assign_time = time.time()
         # while self.running_futures or self.pending_trial_states:
         while not self.trial_manager.is_finish():
-            if (current_time := time.time()) - update_assign_time > 1.0:
+            iterval_time = 2.0
+            if (current_time := time.time()) - update_assign_time > iterval_time:
                 update_assign_time = current_time
                 self.assign_trial_to_worker()
 

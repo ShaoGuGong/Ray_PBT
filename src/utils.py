@@ -32,9 +32,9 @@ class TrialStatus(Enum):
     PENDING = auto()
     TERMINATE = auto()
     PAUSE = auto()
-    INTERRUPTED = auto()
     NEED_MUTATION = auto()
     FAILED = auto()
+    WAITING = auto()
 
     def __str__(self) -> str:
         return self.name

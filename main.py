@@ -187,7 +187,7 @@ if __name__ == "__main__":
     trial_states = generate_trial_states(50)
     tuner = Tuner.options(  # type: ignore[call-arg]
         max_concurrency=13,
-        num_cpus=1,
+        num_cpus=2,
         resources={f"node:{get_head_node_address()}": 0.01},
     ).remote(trial_states, train_step, cifar10_data_loader_factory)
     ray.get(tuner.run.remote())  # type: ignore[call-arg]

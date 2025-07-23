@@ -118,9 +118,6 @@ class TrialState:
     def set_pause(self) -> None:
         self.status = TrialStatus.PAUSE
 
-    def set_interrupted(self) -> None:
-        self.status = TrialStatus.INTERRUPTED
-
     def set_running(self) -> None:
         self.status = TrialStatus.RUNNING
 
@@ -129,3 +126,6 @@ class TrialState:
 
     def set_need_mutation(self) -> None:
         self.status = TrialStatus.NEED_MUTATION
+
+    def set_waiting(self) -> None:
+        self.status = TrialStatus.WAITING
