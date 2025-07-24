@@ -1,16 +1,48 @@
 import heapq
+import logging
 import math
+import random
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+import ray
 
 from .config import (
     MUTATION_ITERATION,
     TRIAL_PROGRESS_OUTPUT_PATH,
 )
 from .trial_state import TrialState
-from .utils import TrialStatus, WorkerType
+from .utils import TrialStatus, WorkerType, colored_progress_bar
 
 
+def get_trial_manager_logger() -> logging.Logger:
+    timestamp = (datetime.now(UTC) + timedelta(hours=8)).strftime("%Y-%m-%d_%H-%M-%S")
+    log_dir = Path.cwd() / "logs" / timestamp
+    Path(log_dir).mkdir(parents=True, exist_ok=True)
+
+    logger = logging.getLogger("TrialManager")
+
+    if not logger.handlers:
+        logger.setLevel(logging.DEBUG)  # 或者選擇更合適的級別
+
+        formatter = logging.Formatter(
+            "[%(asctime)s] %(levelname)s TRIAL_MANAGER -- %(message)s",
+        )
+
+        stream_handler = logging.StreamHandler()
+        stream_handler.setLevel(logging.INFO)  # 只顯示 INFO 級別以上的訊息
+        stream_handler.setFormatter(formatter)
+        logger.addHandler(stream_handler)
+
+        file_handler = logging.FileHandler(Path(log_dir) / "trial_manager.log")
+        file_handler.setLevel(logging.DEBUG)  # 記錄所有級別的日誌
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+
+    return logger
+
+
+@ray.remote
 class TrialManager:
     def __init__(self, trial_states: list[TrialState]) -> None:
         self.all_trials = {trial.id: trial for trial in trial_states}
@@ -22,6 +54,7 @@ class TrialManager:
 
         self._mutation_baseline: float = 0.0
         self._upper_quantile_trials: list[TrialState] = []
+        self.logger = get_trial_manager_logger()
 
     def add_trial(self, trial_state: TrialState) -> None:
         self.all_trials[trial_state.id] = trial_state
@@ -180,31 +213,75 @@ class TrialManager:
         ):
             self.history_best = trial_state
 
+        if self.history_best:
+            self.logger.info(
+                "History best accuracy: %.2f, %s, iteration: %d",
+                self.history_best.accuracy,
+                str(self.history_best.hyperparameter),
+                self.history_best.iteration,
+            )
         self.maybe_update_mutation_baseline()
         self.display_trial_result()
 
     def is_finish(self) -> bool:
         return len(self.completed_ids) >= len(self.all_trials)
 
+    def get_log_file(self) -> str:
+        """
+        取得 worker 對應的日誌檔案內容。
+
+        Returns:
+            dict: 包含 worker ID 與對應日誌內容的字典。
+        """
+        log_dir = None
+        for handler in self.logger.handlers:
+            if isinstance(handler, logging.FileHandler):
+                log_dir = handler.baseFilename
+                break
+
+        if not log_dir:
+            self.logger.error("Logs direction is not exists")
+            return ""
+
+        with Path(log_dir).open("r") as f:
+            return f.read()
+
+    def mutation(self, trial_state: TrialState) -> TrialState:
+        self.logger.info(
+            "Trial %d: 執行mutation, 原始超參數: %s",
+            trial_state.id,
+            trial_state.hyperparameter,
+        )
+
+        upper_quantile = self.get_cached_upper_quantile_trials()
+
+        chose_trial = random.choice(upper_quantile)
+        hyperparameter = chose_trial.hyperparameter.explore()
+
+        trial_state.hyperparameter = hyperparameter
+        trial_state.checkpoint = chose_trial.checkpoint
+
+        self.logger.info(
+            "Trial-%d Iter-%d, 結束mutation, 新超參數: %s",
+            trial_state.id,
+            trial_state.iteration,
+            trial_state.hyperparameter,
+        )
+
+        return trial_state
+
     def display_trial_result(
         self,
         output_path: Path = TRIAL_PROGRESS_OUTPUT_PATH,
     ) -> None:
-        literal_status = {
-            TrialStatus.RUNNING: f"\033[32m{TrialStatus.RUNNING:^11}\033[0m",
-            TrialStatus.PENDING: f"\033[33m{TrialStatus.PENDING:^11}\033[0m",
-            TrialStatus.WAITING: f"\033[34m{TrialStatus.WAITING:^11}\033[0m",
-            TrialStatus.FAILED: f"\033[31m{TrialStatus.FAILED:^11}\033[0m",
-            TrialStatus.TERMINATE: f"\033[90m{TrialStatus.TERMINATE:^11}\033[0m",
-        }
         try:
             with Path(output_path).open("w") as f:
                 f.write(
-                    f"┏{'':━^4}┳{'':━^11}┳{'':━^11}┳{'':━^37}┳{'':━^7}┳{'':━^7}┓\n"
-                    f"┃{'':^4}┃{'':^11}┃{'Worker':^11}┃{'Hyparameter':^37}┃{'':^7}┃{'':^7}┃\n"
-                    f"┃{'ID':^4}┃{'Status':^11}┣{'':━^4}┳{'':━^6}╋{'':━^7}┳{'':━^10}┳{'':━^6}┳{'':━^11}┫{'Iter':^7}┃{'Acc':^7}┃\n"
-                    f"┃{'':^4}┃{'':^11}┃{'ID':^4}┃{'TYPE':^6}┃{'lr':^7}┃{'momentum':^10}┃{'bs':^6}┃{'model':^11}┃{'':^7}┃{'':^7}┃\n"
-                    f"┣{'':━^4}╋{'':━^11}╋{'':━^4}╋{'':━^6}╋{'':━^7}╋{'':━^10}╋{'':━^6}╋{'':━^11}╋{'':━^7}╋{'':━^7}┫\n",
+                    f"┏{'':━^4}┳{'':━^11}┳{'':━^6}┳{'':━^11}┳{'':━^37}┳{'':━^7}┳{'':━^7}┓\n"
+                    f"┃{'':^4}┃{'':^11}┃{'':^6}┃{'Worker':^11}┃{'Hyparameter':^37}┃{'':^7}┃{'':^7}┃\n"
+                    f"┃{'ID':^4}┃{'Status':^11}┃{'SaveAt':^6}┣{'':━^4}┳{'':━^6}╋{'':━^7}┳{'':━^10}┳{'':━^6}┳{'':━^11}┫{'Iter':^7}┃{'Acc':^7}┃\n"
+                    f"┃{'':^4}┃{'':^11}┃{'':^6}┃{'ID':^4}┃{'TYPE':^6}┃{'lr':^7}┃{'momentum':^10}┃{'bs':^6}┃{'model':^11}┃{'':^7}┃{'':^7}┃\n"
+                    f"┣{'':━^4}╋{'':━^11}╋{'':━^6}╋{'':━^4}╋{'':━^6}╋{'':━^7}╋{'':━^10}╋{'':━^6}╋{'':━^11}╋{'':━^7}╋{'':━^7}┫\n",
                 )
 
                 for i in self.all_trials.values():
@@ -220,18 +297,49 @@ class TrialManager:
                     worker_id = ""
                     if i.worker_id != -1:
                         worker_id = i.worker_id
-                    status = literal_status.get(i.status, i.status)
+                    if i.last_checkpoint_location.is_empty():
+                        save_at = ""
+                    else:
+                        save_at = i.last_checkpoint_location.worker_id
+
                     f.write(
-                        f"┃{i.id:>4}┃{status:^11}┃{worker_id:>4}┃{worker_type:^6}┃{h.lr:>7.3f}┃{h.momentum:>10.3f}┃{h.batch_size:>6}┃{h.model_type:^11}┃{i.iteration:>7}┃{i.accuracy:>7.3f}┃\n",
+                        f"┃{i.id:>4}┃{i.status:^11}┃{save_at:>6}┃{worker_id:>4}┃{worker_type:^6}┃{h.lr:>7.3f}┃{h.momentum:>10.3f}┃{h.batch_size:>6}┃{h.model_type:^11}┃{i.iteration:>7}┃{i.accuracy:>7.3f}┃\n",
                     )
                 timestamp = (datetime.now(UTC) + timedelta(hours=8)).strftime(
                     "%Y-%m-%d %H:%M:%S",
                 )
 
                 f.write(
-                    f"┗{'':━^4}┻{'':━^11}┻{'':━^4}┻{'':━^6}┻{'':━^7}┻{'':━^10}┻{'':━^6}┻{'':━^11}┻{'':━^7}┻{'':━^7}┛\n"
+                    f"┗{'':━^4}┻{'':━^11}┻{'':━^6}┻{'':━^4}┻{'':━^6}┻{'':━^7}┻{'':━^10}┻{'':━^6}┻{'':━^11}┻{'':━^7}┻{'':━^7}┛\n"
                     f"{timestamp}\n",
                 )
 
         except Exception as e:  # noqa: BLE001
             print(f"{e}")  # noqa: T201
+
+    def print_iteration_count(self) -> None:
+        iteration_counts = [
+            (i.id, i.device_iteration_count) for i in self.all_trials.values()
+        ]
+
+        iteration_counts.sort(key=lambda x: x[0])
+
+        for index, value in iteration_counts:
+            self.logger.info(
+                "Trial:%2d CPU/GPU %s",
+                index,
+                colored_progress_bar(
+                    [value[WorkerType.CPU], value[WorkerType.GPU]],
+                    40,
+                ),
+            )
+        self.logger.info(
+            "Total    CPU/GPU %s",
+            colored_progress_bar(
+                [
+                    sum(i[1][WorkerType.CPU] for i in iteration_counts),
+                    sum(i[1][WorkerType.GPU] for i in iteration_counts),
+                ],
+                40,
+            ),
+        )

@@ -19,6 +19,7 @@ from .utils import (
     TrialStatus,
     WorkerState,
     WorkerType,
+    get_head_node_address,
     timer,
 )
 
@@ -107,6 +108,7 @@ class Worker:
         worker_state: WorkerState,
         train_step: TrainStepFunction,
         tuner: ActorHandle,
+        trial_manager: ActorHandle,
         dataloader_factory: DataloaderFactory,
     ) -> None:
         """
@@ -126,6 +128,7 @@ class Worker:
             worker_type=worker_state.worker_type,
         )
         self.tuner: ActorHandle = tuner
+        self.trial_manager: ActorHandle = trial_manager
         self.mutation_iteration: int = MUTATION_ITERATION
         self.interrupt_set: set = set()
         self.dataloader_factory: DataloaderFactory = dataloader_factory
@@ -173,7 +176,7 @@ class Worker:
         self.log("info", "取得並移除 Checkpoint", trial_id=trial_id)
         return self.saved_checkpoint.pop(trial_id, Checkpoint.empty())
 
-    def remove_chekcpoint(self, trial_id: int) -> None:
+    def remove_checkpoint(self, trial_id: int) -> None:
         """
         移除指定試驗的檢查點。
 
@@ -237,8 +240,10 @@ class Worker:
         if len(self.active_trials) >= self.worker_state.max_trials:
             return
 
+        self.log("info", "接收到新的 Trial", trial_id=trial_state.id)
         self._trial_load_checkpoint(trial_state)
         self.save_checkpoint(trial_state)
+        trial_state.update_worker_state(self.worker_state)
         self.active_trials[trial_state.id] = trial_state
 
     def run(self) -> None:
@@ -253,7 +258,7 @@ class Worker:
                 continue
 
             trial_state.set_running()
-            self.tuner.update_trial.remote(trial_state)  # type: ignore[reportGeneralTypeIssues]
+            self.trial_manager.update_trial.remote(trial_state)  # type: ignore[reportGeneralTypeIssues]
 
             self.log(
                 "info",
@@ -277,7 +282,7 @@ class Worker:
                     break
 
                 match trial_state.status:
-                    case TrialStatus.TERMINATE:
+                    case TrialStatus.TERMINATED:
                         trial_state.update_checkpoint(model, optimizer)
 
                         self.tuner.submit_trial.remote(
@@ -299,7 +304,7 @@ class Worker:
 
                     case TrialStatus.RUNNING:
                         if index != trial_state.chunk_size - 1:
-                            self.tuner.update_trial.remote(trial_state)  # type: ignore[reportGeneralTypeIssues]
+                            self.trial_manager.update_trial.remote(trial_state)  # type: ignore[reportGeneralTypeIssues]
 
             if trial_state.id in self.interrupt_set:
                 continue
@@ -310,7 +315,10 @@ class Worker:
                 trial_state.update_checkpoint(model, optimizer)
                 self.save_checkpoint(trial_state)
 
-                self.tuner.submit_trial.remote(self.worker_state.id, trial_state)
+                self.tuner.submit_trial.remote(
+                    self.worker_state.id,
+                    trial_state,
+                )
                 self.active_trials.pop(trial_state.id)
 
     def train(
@@ -368,7 +376,7 @@ class Worker:
         if trial_state.status != TrialStatus.RUNNING:
             return trial_state
 
-        baseline = ray.get(self.tuner.get_mutation_baseline.remote())  # type: ignore[reportGeneralTypeIssues]
+        baseline = ray.get(self.trial_manager.get_mutation_baseline.remote())  # type: ignore[reportGeneralTypeIssues]
         mutation_ratio = 0.25
 
         if trial_state.accuracy <= baseline and random.random() >= mutation_ratio:

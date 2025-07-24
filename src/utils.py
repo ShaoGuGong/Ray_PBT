@@ -30,7 +30,7 @@ class ModelType(Enum):
 class TrialStatus(Enum):
     RUNNING = auto()
     PENDING = auto()
-    TERMINATE = auto()
+    TERMINATED = auto()
     PAUSE = auto()
     NEED_MUTATION = auto()
     FAILED = auto()

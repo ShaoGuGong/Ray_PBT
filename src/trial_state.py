@@ -96,7 +96,7 @@ class TrialState:
     def remove_remote_checkpoint(self) -> None:
         if self.last_checkpoint_location.is_empty():
             return
-        self.last_checkpoint_location.worker_reference.pop_checkpoint.remote(  # type:ignore[reportGeneralTypeIssues]
+        self.last_checkpoint_location.worker_reference.remove_checkpoint.remote(  # type:ignore[reportGeneralTypeIssues]
             self.id,
         )
 
@@ -113,7 +113,7 @@ class TrialState:
         self.chunk_size = chunk_size
 
     def set_terminated(self) -> None:
-        self.status = TrialStatus.TERMINATE
+        self.status = TrialStatus.TERMINATED
 
     def set_pause(self) -> None:
         self.status = TrialStatus.PAUSE
