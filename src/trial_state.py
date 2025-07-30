@@ -1,13 +1,14 @@
 import copy
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from dataclasses import dataclass, field
 
 import ray
 import torch
 from torch import device, nn, optim
 
 from .config import (
+    MAX_GENERATION,
     STOP_ACCURACY,
-    STOP_ITERATION,
 )
 from .utils import (
     Checkpoint,
@@ -19,37 +20,36 @@ from .utils import (
     WorkerType,
 )
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
 
-
+@dataclass(slots=True)
 class TrialState:
-    def __init__(
-        self,
-        trial_id: int,
-        hyperparameter: Hyperparameter,
-        model_init_fn: ModelInitFunction,
-        stop_iteration: int = STOP_ITERATION,
-    ) -> None:
-        self.id: int = trial_id
-        self.hyperparameter: Hyperparameter = hyperparameter
-        self.stop_iteration: int = stop_iteration
-        self.status: TrialStatus = TrialStatus.PENDING
-        self.worker_id: int = -1
-        self.worker_type: WorkerType | None = None
-        self.run_time: float = 0
-        self.iteration: int = 0
-        self.device_iteration_count = {WorkerType.CPU: 0, WorkerType.GPU: 0}
-        self.checkpoint: Checkpoint = Checkpoint.empty()
-        self.accuracy: float = 0.0
-        self.stop_accuracy: int = STOP_ACCURACY
-        self.chunk_size: int = 1
-        self.last_checkpoint_location: CheckpointLocation = CheckpointLocation.empty()
-        self.model_init_fn: Callable[
-            [device],
-            tuple[nn.Module, optim.Optimizer],
-        ] = (
-            lambda device: model_init_fn(
+    id: int
+    hyperparameter: Hyperparameter
+    _raw_model_init_fn: ModelInitFunction
+    max_generation: int = MAX_GENERATION
+    status: TrialStatus = TrialStatus.PENDING
+    worker_id: int = -1
+    worker_type: WorkerType | None = None
+    run_time: float = 0
+    generation: int = 0
+    device_iteration_count: dict[WorkerType, int] = field(
+        default_factory=lambda: {WorkerType.CPU: 0, WorkerType.GPU: 0},
+    )
+    checkpoint: Checkpoint = field(default_factory=Checkpoint.empty)
+    last_checkpoint_location: CheckpointLocation = field(
+        default_factory=CheckpointLocation.empty,
+    )
+    accuracy: float = 0.0
+    stop_accuracy: float = STOP_ACCURACY
+    chunk_size: int = 1
+    model_init_fn: Callable[
+        [device],
+        tuple[nn.Module, optim.Optimizer],
+    ] = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        self.model_init_fn = (
+            lambda device: self._raw_model_init_fn(
                 self.hyperparameter,
                 self.checkpoint,
                 device,

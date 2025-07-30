@@ -153,7 +153,11 @@ class WorkerManager:
             msg = f"Worker {worker_id} 不存在."
             raise ValueError(msg)
 
-        entry.active_trials.remove(trial_id)
+        try:
+            entry.active_trials.remove(trial_id)
+        except ValueError:
+            msg = f"Trial {trial_id} 不存在於 {entry.active_trials}"
+            self.logger.exception(msg)
 
     def stop_all_workers(self) -> None:
         ray.get(

@@ -8,7 +8,7 @@ from pathlib import Path
 import ray
 
 from .config import (
-    MUTATION_ITERATION,
+    ITERATION_PER_GENERATION,
     TRIAL_PROGRESS_OUTPUT_PATH,
 )
 from .trial_state import TrialState
@@ -103,8 +103,8 @@ class TrialManager:
             return []
 
         pending_trials = self.get_pending_trials()
-        min_iter = min(pending_trials, key=lambda t: t.iteration).iteration
-        return [trial for trial in pending_trials if trial.iteration == min_iter]
+        min_iter = min(pending_trials, key=lambda t: t.generation).generation
+        return [trial for trial in pending_trials if trial.generation == min_iter]
 
     def get_least_iterated_pending_trial(self) -> TrialState | None:
         if not self.pending_ids:
@@ -112,7 +112,7 @@ class TrialManager:
 
         return min(
             (self.all_trials[tid] for tid in self.pending_ids),
-            key=lambda t: t.iteration,
+            key=lambda t: t.generation,
             default=None,
         )
 
@@ -122,18 +122,17 @@ class TrialManager:
 
         return max(
             (self.all_trials[tid] for tid in self.pending_ids),
-            key=lambda t: t.iteration,
+            key=lambda t: t.generation,
             default=None,
         )
 
-    def get_chunk_size(self, iteration: int) -> int:
-        iterations = sorted(
-            [trial.iteration for trial in self.all_trials.values()],
+    def get_chunk_size(self, generation: int) -> int:
+        generations = sorted(
+            [trial.generation for trial in self.all_trials.values()],
             reverse=True,
         )
-        length = (len(iterations) // 4) + 1
-        chunk_size = sum(iterations[:length]) // length - iteration
-        chunk_size = (chunk_size + MUTATION_ITERATION) // MUTATION_ITERATION
+        length = (len(generations) // 4) + 1
+        chunk_size = sum(generations[:length]) // length - generation + 1
         return max(chunk_size, 1)
 
     def get_history_best_result(self) -> TrialState | None:
@@ -147,7 +146,7 @@ class TrialManager:
                 for trial in self.all_trials.values()
                 if trial.id in self.pending_ids
             ],
-            key=lambda t: t.iteration,
+            key=lambda t: t.generation,
         )
 
     def get_mutation_baseline(
@@ -218,7 +217,7 @@ class TrialManager:
                 "History best accuracy: %.2f, %s, iteration: %d",
                 self.history_best.accuracy,
                 str(self.history_best.hyperparameter),
-                self.history_best.iteration,
+                self.history_best.generation,
             )
         self.maybe_update_mutation_baseline()
         self.display_trial_result()
@@ -264,7 +263,7 @@ class TrialManager:
         self.logger.info(
             "Trial-%d Iter-%d, 結束mutation, 新超參數: %s",
             trial_state.id,
-            trial_state.iteration,
+            trial_state.generation,
             trial_state.hyperparameter,
         )
 
@@ -279,7 +278,7 @@ class TrialManager:
                 f.write(
                     f"┏{'':━^4}┳{'':━^11}┳{'':━^6}┳{'':━^11}┳{'':━^37}┳{'':━^7}┳{'':━^7}┓\n"
                     f"┃{'':^4}┃{'':^11}┃{'':^6}┃{'Worker':^11}┃{'Hyparameter':^37}┃{'':^7}┃{'':^7}┃\n"
-                    f"┃{'ID':^4}┃{'Status':^11}┃{'SaveAt':^6}┣{'':━^4}┳{'':━^6}╋{'':━^7}┳{'':━^10}┳{'':━^6}┳{'':━^11}┫{'Iter':^7}┃{'Acc':^7}┃\n"
+                    f"┃{'ID':^4}┃{'Status':^11}┃{'SaveAt':^6}┣{'':━^4}┳{'':━^6}╋{'':━^7}┳{'':━^10}┳{'':━^6}┳{'':━^11}┫{'Gene':^7}┃{'Acc':^7}┃\n"
                     f"┃{'':^4}┃{'':^11}┃{'':^6}┃{'ID':^4}┃{'TYPE':^6}┃{'lr':^7}┃{'momentum':^10}┃{'bs':^6}┃{'model':^11}┃{'':^7}┃{'':^7}┃\n"
                     f"┣{'':━^4}╋{'':━^11}╋{'':━^6}╋{'':━^4}╋{'':━^6}╋{'':━^7}╋{'':━^10}╋{'':━^6}╋{'':━^11}╋{'':━^7}╋{'':━^7}┫\n",
                 )
@@ -303,7 +302,7 @@ class TrialManager:
                         save_at = i.last_checkpoint_location.worker_id
 
                     f.write(
-                        f"┃{i.id:>4}┃{i.status:^11}┃{save_at:>6}┃{worker_id:>4}┃{worker_type:^6}┃{h.lr:>7.3f}┃{h.momentum:>10.3f}┃{h.batch_size:>6}┃{h.model_type:^11}┃{i.iteration:>7}┃{i.accuracy:>7.3f}┃\n",
+                        f"┃{i.id:>4}┃{i.status:^11}┃{save_at:>6}┃{worker_id:>4}┃{worker_type:^6}┃{h.lr:>7.3f}┃{h.momentum:>10.3f}┃{h.batch_size:>6}┃{h.model_type:^11}┃{i.generation:>7}┃{i.accuracy:>7.3f}┃\n",
                     )
                 timestamp = (datetime.now(UTC) + timedelta(hours=8)).strftime(
                     "%Y-%m-%d %H:%M:%S",

@@ -55,7 +55,7 @@ def gpu_scheduling(
 
     # 設定 chunk_size、worker_id、worker_type 並標記為執行狀態
     selected_trial.set_chunk_size(
-        ray.get(trial_manager.get_chunk_size.remote(selected_trial.iteration)),  # type: ignore[reportGeneralTypeIssues]
+        ray.get(trial_manager.get_chunk_size.remote(selected_trial.generation)),  # type: ignore[reportGeneralTypeIssues]
     )
     selected_trial.worker_id = selected_worker_entry.id
     selected_trial.worker_type = WorkerType.GPU
@@ -88,32 +88,13 @@ def cpu_scheduling(
 
     # 選擇第一個可用的 worker
     selected_worker_entry = available_worker_entries[0]
+    selected_trial = ray.get(
+        trial_manager.get_nlargest_iteration_trials.remote(  # type: ignore[reportGeneralTypeIssues]
+            len(worker_manager.cpu_workers),
+        ),
+    )
 
-    # 取得 iteration 較高的 Trials, 個數為 CPU 數
-    # trial_states = ray.get(
-    #     trial_manager.get_nlargest_iteration_trials.remote(  # type: ignore[reportGeneralTypeIssues]
-    #         int(len(worker_manager.cpu_workers) + 3),
-    #     ),
-    # )
-    # trial_states = trial_states[3:]
-    #
-    # if trial_states is None or not trial_states:
-    #     return
-    #
-    # # 優先選擇 checkpoint 來自該 worker 的 trial, 否則選最後一個(iteration 最小)
-    # selected_trial = next(
-    #     (
-    #         t
-    #         for t in trial_states
-    #         if not t.last_checkpoint_location.is_empty()
-    #         and t.last_checkpoint_location.worker_id == selected_worker_entry.id
-    #     ),
-    #     trial_states[-1],
-    # )
-
-    selected_trial = ray.get(trial_manager.get_nlargest_iteration_trial.remote())  # type: ignore[reportGeneralTypeIssues]
-
-    if selected_trial:
+    if not selected_trial:
         return
 
     selected_trial = selected_trial[-1]

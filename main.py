@@ -9,7 +9,7 @@ from torch import nn, optim
 from torch.utils.data import DataLoader
 from torchvision import models, transforms
 
-from src.config import DATASET_PATH, STOP_ITERATION
+from src.config import DATASET_PATH, MAX_GENERATION
 from src.trial_state import TrialState
 from src.tuner import Tuner
 from src.utils import Checkpoint, Hyperparameter, get_head_node_address, unzip_file
@@ -143,8 +143,7 @@ def generate_trial_states(n: int = 1) -> list[TrialState]:
         TrialState(
             i,
             Hyperparameter.random(),
-            model_init_fn=resnet18_init_fn,
-            stop_iteration=STOP_ITERATION,
+            resnet18_init_fn,
         )
         for i in range(n)
     ]

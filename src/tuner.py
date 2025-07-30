@@ -93,63 +93,77 @@ class Tuner:
         self.logger.info("Assign: %d", self.worker_manager.assign_count["assign"])
         self.logger.info("Locality: %d", self.worker_manager.assign_count["locality"])
 
-    def submit_trial(self, worker_id: int, trial_state: TrialState) -> None:
-        status = trial_state.status
+    def on_trial_result(
+        self,
+        worker_id: int,
+        trial_id: int,
+        trial_state: TrialState,
+    ) -> None:
+        pass
 
-        match status:
-            case TrialStatus.PAUSE:
-                trial_state.set_pending()
-                self.logger.info(
-                    "🔃 Worker %2d 回傳未完成 Trial %2d, Iteration: %d, Accuracy: %.2f",
-                    trial_state.worker_id,
-                    trial_state.id,
-                    trial_state.iteration,
-                    trial_state.accuracy,
-                )
+    def on_trial_complete(
+        self,
+        worker_id: int,
+        trial_id: int,
+        trial_state: TrialState,
+    ) -> None:
+        trial_state.set_terminated()
+        self.logger.info(
+            "✅ Worker %2d Trial %2d 完成, Accuracy: %.2f",
+            trial_state.worker_id,
+            trial_id,
+            trial_state.accuracy,
+        )
+        trial_state.worker_id = -1
+        trial_state.worker_type = None
 
-                trial_state.worker_id = -1
-                trial_state.worker_type = None
+        self.trial_manager.transition_to_completed.remote(trial_state.id)
+        self.trial_manager.update_trial.remote(trial_state)
+        self.worker_manager.release_slots(worker_id, trial_state.id)
 
-                self.trial_manager.transition_to_pending.remote(trial_state.id)
-                self.trial_manager.update_trial.remote(trial_state)
+    def on_trial_step_complete(
+        self,
+        worker_id: int,
+        trial_id: int,
+        trial_state: TrialState,
+    ) -> None:
+        trial_state.set_pending()
+        self.logger.info(
+            "🔃 Worker %2d 回傳未完成 Trial %2d, Iteration: %d, Accuracy: %.2f",
+            worker_id,
+            trial_id,
+            trial_state.generation,
+            trial_state.accuracy,
+        )
 
-            case TrialStatus.NEED_MUTATION:
-                trial_state.set_pending()
-                trial_state = ray.get(self.trial_manager.mutation.remote(trial_state))  # type: ignore[reportGeneralTypeIssues]
-                if trial_state.checkpoint.is_empty():
-                    self.logger.warning("Trial %d checkpoint is None", trial_state.id)
+        trial_state.worker_id = -1
+        trial_state.worker_type = None
 
-                trial_state.worker_id = -1
-                trial_state.worker_type = None
+        self.trial_manager.transition_to_pending.remote(trial_state.id)
+        self.trial_manager.update_trial.remote(trial_state)
+        self.worker_manager.release_slots(worker_id, trial_state.id)
 
-                self.trial_manager.transition_to_pending.remote(trial_state.id)
-                self.trial_manager.update_trial.remote(trial_state)
+    def on_trial_need_mutation(
+        self,
+        worker_id: int,
+        trial_id: int,
+        trial_state: TrialState,
+    ) -> None:
+        self.logger.info(
+            "🔃 Worker %2d 回傳 Trial %2d 執行 mutation",
+            worker_id,
+            trial_id,
+        )
+        trial_state.set_pending()
+        trial_state = ray.get(self.trial_manager.mutation.remote(trial_state))  # type: ignore[reportGeneralTypeIssues]
+        if trial_state.checkpoint.is_empty():
+            self.logger.warning("Trial %d checkpoint is None", trial_state.id)
 
-            case TrialStatus.TERMINATED:
-                trial_state.set_terminated()
-                self.logger.info(
-                    "✅ Worker %2d Trial %2d 完成, Accuracy: %.2f",
-                    trial_state.worker_id,
-                    trial_state.id,
-                    trial_state.accuracy,
-                )
-                trial_state.worker_id = -1
-                trial_state.worker_type = None
+        trial_state.worker_id = -1
+        trial_state.worker_type = None
 
-                self.trial_manager.transition_to_completed.remote(trial_state.id)
-                self.trial_manager.update_trial.remote(trial_state)
-
-            case TrialStatus.FAILED:
-                self.trial_manager.transition_to_completed.remote(trial_state.id)
-                trial_state.worker_id = -1
-                trial_state.worker_type = None
-
-                self.logger.warning(
-                    "Worker %2d Trial %2d  發生錯誤, 已中止訓練",
-                    trial_state.worker_id,
-                    trial_state.id,
-                )
-
+        self.trial_manager.transition_to_pending.remote(trial_state.id)
+        self.trial_manager.update_trial.remote(trial_state)
         self.worker_manager.release_slots(worker_id, trial_state.id)
 
     def get_zipped_log(self) -> bytes:

@@ -9,17 +9,15 @@ from torch import nn, optim
 from torch.utils.data import DataLoader
 
 from .config import (
-    MUTATION_ITERATION,
+    ITERATION_PER_GENERATION,
 )
 from .trial_state import TrialState
 from .utils import (
     Checkpoint,
     DataloaderFactory,
     TrainStepFunction,
-    TrialStatus,
     WorkerState,
     WorkerType,
-    get_head_node_address,
     timer,
 )
 
@@ -129,7 +127,7 @@ class Worker:
         )
         self.tuner: ActorHandle = tuner
         self.trial_manager: ActorHandle = trial_manager
-        self.mutation_iteration: int = MUTATION_ITERATION
+        self.iteration_per_generation: int = ITERATION_PER_GENERATION
         self.interrupt_set: set = set()
         self.dataloader_factory: DataloaderFactory = dataloader_factory
         self.is_stop: bool = False
@@ -146,7 +144,7 @@ class Worker:
         self.interrupt_set.add(trial_id)
         trial_state.set_pause()
 
-        self.tuner.submit_trial.remote(self.worker_state.id, trial_state)
+        self.tuner.on_trial_step_complete.remote(self.worker_state.id, trial_state)
 
     def save_checkpoint(self, trial_state: TrialState) -> None:
         self.log("info", "儲存 Checkpoint", trial_id=trial_state.id)
@@ -250,7 +248,7 @@ class Worker:
         while not self.is_stop:
             trial_state = min(
                 self.active_trials.values(),
-                key=lambda x: x.iteration,
+                key=lambda x: x.generation,
                 default=None,
             )
 
@@ -275,51 +273,8 @@ class Worker:
 
             model, optimizer = trial_state.model_init_fn(self.device)
 
-            for index in range(trial_state.chunk_size):
-                self.train(trial_state, model, optimizer, train_loader, test_loader)
-
-                if trial_state.id in self.interrupt_set:
-                    break
-
-                match trial_state.status:
-                    case TrialStatus.TERMINATED:
-                        trial_state.update_checkpoint(model, optimizer)
-
-                        self.tuner.submit_trial.remote(
-                            self.worker_state.id,
-                            trial_state,
-                        )  # type: ignore[reportGeneralTypeIssues]
-                        self.active_trials.pop(trial_state.id)
-                        break
-                    case TrialStatus.PAUSE | TrialStatus.NEED_MUTATION:
-                        trial_state.update_checkpoint(model, optimizer)
-                        self.save_checkpoint(trial_state)
-
-                        self.tuner.submit_trial.remote(
-                            self.worker_state.id,
-                            trial_state,
-                        )  # type: ignore[reportGeneralTypeIssues]
-                        self.active_trials.pop(trial_state.id)
-                        break
-
-                    case TrialStatus.RUNNING:
-                        if index != trial_state.chunk_size - 1:
-                            self.trial_manager.update_trial.remote(trial_state)  # type: ignore[reportGeneralTypeIssues]
-
-            if trial_state.id in self.interrupt_set:
-                continue
-
-            if trial_state.status == TrialStatus.RUNNING:
-                trial_state.set_pause()
-
-                trial_state.update_checkpoint(model, optimizer)
-                self.save_checkpoint(trial_state)
-
-                self.tuner.submit_trial.remote(
-                    self.worker_state.id,
-                    trial_state,
-                )
-                self.active_trials.pop(trial_state.id)
+            self.train(trial_state, model, optimizer, train_loader, test_loader)
+            self.active_trials.pop(trial_state.id)
 
     def train(
         self,
@@ -328,7 +283,7 @@ class Worker:
         optimizer: optim.Optimizer,
         train_loader: DataLoader,
         test_loader: DataLoader,
-    ) -> TrialState:
+    ) -> None:
         """
         執行試驗的訓練流程。
 
@@ -338,56 +293,75 @@ class Worker:
         Returns:
             TrialState: 訓練後的試驗狀態。
         """
-        for _ in range(
-            self.mutation_iteration - trial_state.iteration % self.mutation_iteration,
-        ):
-            if trial_state.id in self.interrupt_set:
-                return trial_state
 
-            if trial_state.iteration >= trial_state.stop_iteration:
-                trial_state.set_terminated()
-                break
+        for _ in range(trial_state.chunk_size):
+            for _ in range(self.iteration_per_generation):
+                if trial_state.generation >= trial_state.max_generation:
+                    trial_state.set_terminated()
+                    break
 
-            self.train_step(
-                model,
-                optimizer,
-                train_loader,
-                trial_state.hyperparameter.batch_size,
-                self.device,
-            )
+                if trial_state.id in self.interrupt_set:
+                    return
 
-            trial_state.iteration += 1
-            trial_state.device_iteration_count[self.worker_state.worker_type] += 1
+                self.train_step(
+                    model,
+                    optimizer,
+                    train_loader,
+                    trial_state.hyperparameter.batch_size,
+                    self.device,
+                )
 
-        trial_state.accuracy = self.test(model, test_loader)
+                trial_state.device_iteration_count[self.worker_state.worker_type] += 1
 
-        self.log(
-            "info",
-            f"Iteration: {trial_state.iteration} Accuracy: {trial_state.accuracy}",
-            trial_id=trial_state.id,
-        )
+            trial_state.generation += 1
+            trial_state.accuracy = self.test(model, test_loader)
 
-        if (
-            trial_state.iteration >= trial_state.stop_iteration
-            or trial_state.accuracy >= trial_state.stop_accuracy
-        ):
-            trial_state.set_terminated()
-
-        if trial_state.status != TrialStatus.RUNNING:
-            return trial_state
-
-        baseline = ray.get(self.trial_manager.get_mutation_baseline.remote())  # type: ignore[reportGeneralTypeIssues]
-        mutation_ratio = 0.25
-
-        if trial_state.accuracy <= baseline and random.random() >= mutation_ratio:
             self.log(
                 "info",
-                f"Baseline: {baseline}, Accuracy: {trial_state.accuracy}",
+                f"Generation: {trial_state.generation} "
+                f"Accuracy: {trial_state.accuracy}",
                 trial_id=trial_state.id,
             )
-            trial_state.set_need_mutation()
 
-        return trial_state
+            if (
+                trial_state.generation >= trial_state.max_generation
+                or trial_state.accuracy >= trial_state.stop_accuracy
+            ):
+                trial_state.set_terminated()
+                trial_state.update_checkpoint(model, optimizer)
+                self.tuner.on_trial_complete.remote(
+                    self.worker_state.id,
+                    trial_state.id,
+                    trial_state,
+                )
+                return
+
+            baseline = ray.get(self.trial_manager.get_mutation_baseline.remote())  # type: ignore[reportGeneralTypeIssues]
+            mutation_ratio = 0.25
+
+            if trial_state.accuracy <= baseline and random.random() >= mutation_ratio:
+                self.log(
+                    "info",
+                    f"Baseline: {baseline}, Accuracy: {trial_state.accuracy}",
+                    trial_id=trial_state.id,
+                )
+                trial_state.set_need_mutation()
+                trial_state.update_checkpoint(model, optimizer)
+                self.tuner.on_trial_need_mutation.remote(
+                    self.worker_state.id,
+                    trial_state.id,
+                    trial_state,
+                )
+                self.pop_checkpoint(trial_state.id)
+                return
+
+        trial_state.set_pause()
+        trial_state.update_checkpoint(model, optimizer)
+        self.tuner.on_trial_step_complete.remote(
+            self.worker_state.id,
+            trial_state.id,
+            trial_state,
+        )
 
     def test(self, model: nn.Module, test_loader: DataLoader) -> float:
         """
