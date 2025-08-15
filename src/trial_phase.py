@@ -2,6 +2,13 @@ from .trial_state import TrialState
 
 
 class TrialPhase:
+    __slots__ = (
+        "current_phase",
+        "first_phase",
+        "last_phase",
+        "thresholds",
+    )
+
     def __init__(
         self,
         stop_iteration: int,

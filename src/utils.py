@@ -5,7 +5,7 @@ import zipfile
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from enum import Enum, auto
 from functools import reduce
 from pathlib import Path
@@ -14,9 +14,8 @@ from typing import Any, Protocol, TypeVar
 import numpy as np
 import ray
 from numpy._typing import NDArray
-from numpy.random import Generator
 from scipy.linalg import expm
-from torch import nn, optim
+from torch import device, nn, optim
 from torch.utils.data import DataLoader
 
 # ╭──────────────────────────────────────────────────────────╮
@@ -66,7 +65,7 @@ class DatasetType(Enum):
 # ╰──────────────────────────────────────────────────────────╯
 
 
-@dataclass
+@dataclass(slots=True)
 class WorkerState:
     id: int
     num_cpus: int
@@ -77,7 +76,7 @@ class WorkerState:
     worker_type: WorkerType = WorkerType.CPU
 
 
-@dataclass
+@dataclass(slots=True)
 class Hyperparameter:
     lr: float
     momentum: float
@@ -100,7 +99,7 @@ class Hyperparameter:
                 self.momentum,
                 self.weight_decay,
                 self.dampening,
-                (self.batch_size - 32) / 224.0,
+                (self.batch_size - 32) / 480.0,
             ],
         )
 
@@ -111,18 +110,18 @@ class Hyperparameter:
             momentum=random.uniform(1e-4, 1e-1),
             weight_decay=random.uniform(1e-7, 1e-4),
             dampening=random.uniform(1e-7, 1e-4),
-            batch_size=int(random.uniform(0.0, 1.0) * 224.0 + 32),
+            batch_size=int(random.uniform(0.0, 1.0) * 480.0 + 32),
             model_type=ModelType.RESNET_18,
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class Fitness:
     fitness: float
     hyperparameter: Hyperparameter
 
 
-@dataclass
+@dataclass(slots=True)
 class NaturalGradients:
     sigma_gradient: np.floating
     delta_gradient: NDArray[np.floating]
@@ -141,8 +140,8 @@ class Distribution:
     mean: NDArray[np.floating]
     sigma: float
     b_matrix: NDArray[np.floating]
-    random_generator: Generator
     fitnesses: deque[Fitness]
+    previous_gradients: NaturalGradients | None
 
     @staticmethod
     def fitness_shaping(fitnesses: list[Fitness]) -> list:
@@ -171,20 +170,19 @@ class Distribution:
 
     @classmethod
     def get_random_ditribution(cls) -> "Distribution":
-        random_generator = np.random.default_rng()
-        init_hyper = np.concat(
+        init_hyper = np.concatenate(
             [
-                random_generator.uniform(
+                np.random.uniform(  # noqa:NPY002
                     1e-4,
                     1e-1,
                     size=2,
                 ),
-                random_generator.uniform(
+                np.random.uniform(  # noqa:NPY002
                     1e-7,
                     1e-6,
                     size=2,
                 ),
-                random_generator.uniform(
+                np.random.uniform(  # noqa:NPY002
                     0.0,
                     1.0,
                     size=1,
@@ -192,9 +190,7 @@ class Distribution:
             ],
         )
 
-        diag_vals = (
-            random_generator.uniform(0.1, 0.2, size=len(init_hyper)) * init_hyper
-        )
+        diag_vals = np.random.uniform(0.1, 0.333, size=len(init_hyper)) * init_hyper  # noqa: NPY002
         covariance = np.diag(diag_vals)
         square_root_of_covariance = np.linalg.cholesky(covariance).T
         mean = np.array(init_hyper)
@@ -206,8 +202,8 @@ class Distribution:
             mean=mean,
             sigma=sigma,
             b_matrix=b_matrix,
-            random_generator=random_generator,
             fitnesses=deque(maxlen=population_size),
+            previous_gradients=None,
         )
 
     def get_new_hyper(self) -> Hyperparameter:
@@ -215,7 +211,7 @@ class Distribution:
         while modified_sample is None or np.any(
             (modified_sample <= 0.0) | (modified_sample >= 1.0),
         ):
-            sample: NDArray[np.floating] = self.random_generator.multivariate_normal(
+            sample: NDArray[np.floating] = np.random.multivariate_normal(  # noqa: NPY002
                 mean=np.zeros(self.mean.size),
                 cov=np.eye(self.mean.size),
             )
@@ -223,7 +219,7 @@ class Distribution:
         parameter: list[float] = modified_sample.tolist()
         return Hyperparameter(
             *parameter[:-1],
-            batch_size=int(parameter[-1] * 224.0 + 32),
+            batch_size=int(parameter[-1] * 480.0 + 32),
             model_type=ModelType.RESNET_18,
         )
 
@@ -232,6 +228,18 @@ class Distribution:
         dimension = len(self.mean)
         population_size = 4 + int(3 * np.log(dimension))
         if len(self.fitnesses) < population_size:
+            if len(self.fitnesses) == 1:
+                log_dir = Path("~/Documents/workspace/shaogu/Ray_PBT/log/").expanduser()
+                log_dir.mkdir(exist_ok=True)
+                log_file = log_dir / "nes.log"
+                with log_file.open("w") as f:
+                    message = (
+                        "\033[1;91mTune Start Distribution\033[0m\n"
+                        f"Distribution(mean:{self.mean}"
+                        f", sigma:{self.sigma}, b_matrix:{self.b_matrix})"
+                    )
+                    f.write(message)
+                    f.write("\n")
             return
 
         mean_stride = 1.0 / dimension
@@ -264,8 +272,6 @@ class Distribution:
             )
 
             f.write(message)
-            f.write("\n")
-            f.write(str(gradients))
             f.write("\n")
 
     def _compute_gradient(
@@ -311,7 +317,7 @@ class Distribution:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class Checkpoint:
     model_state_dict: dict
     optimizer_state_dict: dict
@@ -325,7 +331,7 @@ Accuracy = float
 
 
 class TrainStepFunction(Protocol):
-    def __call__(self, *args: Any, **kwargs: Any) -> None: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> None: ...  # noqa: ANN401
 
 
 class DataloaderFactory(Protocol):
@@ -339,6 +345,7 @@ class ModelInitFunction(Protocol):
     def __call__(
         self,
         hyperparameter: Hyperparameter,
+        device: device | None,
     ) -> tuple[nn.Module, optim.Optimizer]: ...
 
 
@@ -403,7 +410,7 @@ def unzip_file(zip_path: str, extract_to: str) -> None:
 
 
 def get_tuner_logger() -> logging.Logger:
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    timestamp = (datetime.now(UTC) + timedelta(hours=8)).strftime("%Y-%m-%d_%H-%M-%S")
     log_dir = Path(Path.cwd()) / "logs" / timestamp
     Path(log_dir).mkdir(parents=True, exist_ok=True)
 

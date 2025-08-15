@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
-from torch import nn, optim
+from torch import device, nn, optim
 
 from .config import (
     STOP_ACCURACY,
@@ -56,10 +56,11 @@ class TrialState:
                 )
                 raise ValueError(msg)
 
-            self.model_init_fn: Callable[[], tuple[nn.Module, optim.Optimizer]] = (
-                lambda: model_init_fn(self.hyperparameter)
-            )
-            model, optimizer = self.model_init_fn()
+            self.model_init_fn: Callable[
+                [device | None],
+                tuple[nn.Module, optim.Optimizer],
+            ] = lambda device: model_init_fn(self.hyperparameter, device)
+            model, optimizer = self.model_init_fn(None)
             self.checkpoint = Checkpoint({}, {})
             self.update_checkpoint(model, optimizer)
 
@@ -102,13 +103,13 @@ class TrialState:
 
 
 class TrialResult:
-    __slots__ = {
-        "history_best",
+    __slots__ = (
+        "_history_best",
         "trial_progress",
-    }
+    )
 
     def __init__(self) -> None:
-        self.history_best: tuple[
+        self._history_best: tuple[
             float,
             Hyperparameter | None,
             Checkpoint | None,
@@ -123,8 +124,8 @@ class TrialResult:
 
     def update_trial_result(self, trial_state: TrialState) -> None:
         self.record_trial_progress(trial_state)
-        if trial_state.accuracy > self.history_best[0]:
-            self.history_best = (
+        if trial_state.accuracy > self._history_best[0]:
+            self._history_best = (
                 trial_state.accuracy,
                 trial_state.hyperparameter,
                 trial_state.checkpoint,
@@ -133,7 +134,7 @@ class TrialResult:
     def get_history_best_result(
         self,
     ) -> tuple[float, Hyperparameter | None, Checkpoint | None]:
-        return self.history_best
+        return self._history_best
 
     def get_quantile(
         self,
@@ -161,18 +162,10 @@ class TrialResult:
         try:
             with Path(output_path).open("w") as f:
                 f.write(
-                    f"┏{'':━^4}┳{'':━^11}┳{'':━^11}┳{'':━^37}┳{'':━^3}┳{'':━^7}┳{'':━^7}┓\n",
-                )
-                f.write(
-                    f"┃{'':^4}┃{'':^11}┃{'Worker':^11}┃{'Hyparameter':^37}┃{'':^3}┃{'':^7}┃{'':^7}┃\n",
-                )
-                f.write(
-                    f"┃{'ID':^4}┃{'Status':^11}┣{'':━^4}┳{'':━^6}╋{'':━^7}┳{'':━^10}┳{'':━^6}┳{'':━^11}┫{'Ph':^3}┃{'Iter':^7}┃{'Acc':^7}┃\n",
-                )
-                f.write(
-                    f"┃{'':^4}┃{'':^11}┃{'ID':^4}┃{'TYPE':^6}┃{'lr':^7}┃{'momentum':^10}┃{'bs':^6}┃{'model':^11}┃{'':^3}┃{'':^7}┃{'':^7}┃\n",
-                )
-                f.write(
+                    f"┏{'':━^4}┳{'':━^11}┳{'':━^11}┳{'':━^37}┳{'':━^3}┳{'':━^7}┳{'':━^7}┓\n"
+                    f"┃{'':^4}┃{'':^11}┃{'Worker':^11}┃{'Hyparameter':^37}┃{'':^3}┃{'':^7}┃{'':^7}┃\n"
+                    f"┃{'ID':^4}┃{'Status':^11}┣{'':━^4}┳{'':━^6}╋{'':━^7}┳{'':━^10}┳{'':━^6}┳{'':━^11}┫{'Ph':^3}┃{'Iter':^7}┃{'Acc':^7}┃\n"
+                    f"┃{'':^4}┃{'':^11}┃{'ID':^4}┃{'TYPE':^6}┃{'lr':^7}┃{'momentum':^10}┃{'bs':^6}┃{'model':^11}┃{'':^3}┃{'':^7}┃{'':^7}┃\n"
                     f"┣{'':━^4}╋{'':━^11}╋{'':━^4}╋{'':━^6}╋{'':━^7}╋{'':━^10}╋{'':━^6}╋{'':━^11}╋{'':━^3}╋{'':━^7}╋{'':━^7}┫\n",
                 )
 
@@ -193,5 +186,5 @@ class TrialResult:
                     f"┗{'':━^4}┻{'':━^11}┻{'':━^4}┻{'':━^6}┻{'':━^7}┻{'':━^10}┻{'':━^6}┻{'':━^11}┻{'':━^3}┻{'':━^7}┻{'':━^7}┛\n",
                 )
 
-        except Exception as e:
-            print(f"{e}")
+        except Exception as e:  # noqa: BLE001
+            print(f"{e}")  # noqa: T201

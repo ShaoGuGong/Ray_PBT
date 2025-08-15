@@ -1,5 +1,5 @@
 import logging
-from itertools import count
+from itertools import count, repeat
 from pathlib import Path
 
 import ray
@@ -108,6 +108,21 @@ class Worker:
         logger (logging.Logger): 負責日誌紀錄。
     """
 
+    __slots__ = (
+        "active_trials",
+        "dataloader_factory",
+        "device",
+        "interrupt_set",
+        "is_stop",
+        "logger",
+        "mutation_iteration",
+        "train_step",
+        "trial_current_iteration",
+        "trial_phase",
+        "tuner",
+        "worker_state",
+    )
+
     def __init__(
         self,
         worker_state: WorkerState,
@@ -185,19 +200,21 @@ class Worker:
                 }:
                     update_result_futures.append(
                         self.tuner.submit_trial.remote(trial_state),  # type: ignore[reportGeneralTypeIssues]
-                    )  # type: ignore[reportGeneralTypeIssues]
+                    )
                     self.active_trials.pop(trial_state.id)
+                    self.trial_current_iteration.pop(trial_state.id)
 
                 elif status == TrialStatus.INTERRUPTED:
                     update_result_futures.append(
                         self.tuner.submit_trial.remote(trial_state),  # type: ignore[reportGeneralTypeIssues]
-                    )  # type: ignore[reportGeneralTypeIssues]
+                    )
                     self.active_trials.pop(trial_state.id)
+                    self.trial_current_iteration.pop(trial_state.id)
                     continue
 
                 update_result_futures.append(
                     self.tuner.update_trial_result.remote(trial_state),  # type: ignore[reportGeneralTypeIssues]
-                )  # type: ignore[reportGeneralTypeIssues]
+                )
             ray.wait(update_result_futures, timeout=0.1)  # type: ignore[reportGeneralTypeIssues]
 
     def get_active_trials_nums(self) -> int:
@@ -221,7 +238,29 @@ class Worker:
         """
         return self.worker_state.max_trials - len(self.active_trials)
 
-    def train(self, trial_state: TrialState) -> TrialState:
+    def get_training_attributes(
+        self,
+        trial_state: TrialState,
+    ) -> tuple[nn.Module, optim.Optimizer, DataLoader, DataLoader]:
+        hyper = trial_state.hyperparameter
+        checkpoint = trial_state.checkpoint
+        train_loader, test_loader = self.dataloader_factory(hyper.batch_size)
+
+        model, optimizer = trial_state.model_init_fn(self.device)
+        if checkpoint:
+            model.load_state_dict(checkpoint.model_state_dict)
+            optimizer.load_state_dict(checkpoint.optimizer_state_dict)
+
+        # ───────────────────────── Set Hyperparameters ───────────────────────
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = hyper.lr
+            param_group["momentum"] = hyper.momentum
+            param_group["weight_decay"] = hyper.weight_decay
+            param_group["dampening"] = hyper.dampening
+
+        return model, optimizer, train_loader, test_loader
+
+    def train(self, trial_state: TrialState) -> TrialState:  # noqa: PLR0911, C901
         """
         執行試驗的訓練流程。
 
@@ -234,36 +273,9 @@ class Worker:
         self.log("info", "開始訓練", trial_id=trial_state.id)
         self.log("debug", f"{torch.cuda.is_available()=}")
 
-        try:
-            hyper = trial_state.hyperparameter
-            checkpoint = trial_state.checkpoint
-            train_loader, test_loader = self.dataloader_factory(hyper.batch_size)
-
-            model, optimizer = trial_state.model_init_fn()
-            if checkpoint:
-                model.load_state_dict(checkpoint.model_state_dict)
-            model.to(self.device)
-
-            optimizer = optim.SGD(
-                model.parameters(),
-                lr=hyper.lr,
-                momentum=hyper.momentum,
-                weight_decay=hyper.weight_decay,
-                dampening=hyper.dampening,
-            )  # type: ignore[reportGeneralTypeIssues]
-            if checkpoint:
-                optimizer.load_state_dict(checkpoint.optimizer_state_dict)
-
-            for param_group in optimizer.param_groups:
-                param_group["lr"] = hyper.lr
-                param_group["momentum"] = hyper.momentum
-                param_group["weight_decay"] = hyper.weight_decay
-                param_group["dampening"] = hyper.dampening
-
-        except Exception as e:
-            self.log("error", f"{type(e).__name__}: {e}", trial_state.id)
-            trial_state.status = TrialStatus.FAILED
-            return trial_state
+        model, optimizer, train_loader, test_loader = self.get_training_attributes(
+            trial_state=trial_state,
+        )
 
         while True:
             # 是否達到結束條件
@@ -320,7 +332,6 @@ class Worker:
                 model,
                 optimizer,
                 train_loader,
-                hyper.batch_size,
                 self.device,
             )
 
@@ -509,12 +520,27 @@ def generate_all_workers(
             if node_address in visited_address:
                 continue
 
+            cpus_usage_of_none_cpu_workers = 0
             resource = node["Resources"]
+            if "GPU" in resource:
+                worker_states.extend(
+                    WorkerState(
+                        id=next(count_gen),
+                        num_cpus=1,
+                        num_gpus=1,
+                        node_name=f"node:{node_address}",
+                        max_trials=3,
+                        worker_type=WorkerType.GPU,
+                    )
+                    for _ in repeat(None, int(resource["GPU"]))
+                )
+                cpus_usage_of_none_cpu_workers = int(resource["GPU"])
+
             if "CPU" in resource:
                 if node_address == head_node_address:
-                    cpus = min(resource.get("CPU", 1) - 1, 1)
-                else:
-                    cpus = resource.get("CPU", 1)
+                    visited_address.add(node_address)
+                    continue
+                cpus = min(resource.get("CPU", 1) - cpus_usage_of_none_cpu_workers, 1)
 
                 worker_states.append(
                     WorkerState(
@@ -527,30 +553,6 @@ def generate_all_workers(
                     ),
                 )
 
-            if "GPU" in resource:
-                # for _ in range(int(resource["GPU"])):
-                #     worker_states.append(
-                #         WorkerState(
-                #             id=index,
-                #             num_cpus=0,
-                #             # num_gpus=resource.get("GPU", 0),
-                #             num_gpus=1,
-                #             node_name=f"node:{node_address}",
-                #             max_trials=7,
-                #             worker_type=WorkerType.GPU,
-                #         )
-                #     )
-                #     index += 1
-                worker_states.append(
-                    WorkerState(
-                        id=next(count_gen),
-                        num_cpus=0,
-                        num_gpus=resource["GPU"],
-                        node_name=f"node:{node_address}",
-                        max_trials=12,
-                        worker_type=WorkerType.GPU,
-                    ),
-                )
             visited_address.add(node_address)
 
     workers: list[ActorHandle] = []

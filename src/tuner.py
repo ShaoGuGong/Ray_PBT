@@ -17,13 +17,13 @@ from .worker import generate_all_workers
 
 
 class Tuner:
-    __slots__ = {
+    __slots__ = (
         "logger",
         "scheduler",
         "trial_result",
         "trial_states",
         "workers",
-    }
+    )
 
     def __init__(
         self,
@@ -61,10 +61,11 @@ class Tuner:
 
     def update_trial_result(self, trial_state: TrialState) -> None:
         self.trial_result.update_trial_result(trial_state)
+        history_best = self.trial_result.get_history_best_result()
         self.logger.info(
             "History Best: %.6f %s",
-            self.trial_result.history_best[0],
-            self.trial_result.history_best[1],
+            history_best[0],
+            history_best[1],
         )
 
     def record_trial_progress(self, trial_state: TrialState) -> None:

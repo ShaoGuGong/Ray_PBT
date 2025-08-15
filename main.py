@@ -9,8 +9,7 @@ from time import perf_counter
 import ray
 import torch
 import torchvision
-from torch import nn, optim
-from torch._prims_common import DeviceLikeType
+from torch import device, nn, optim
 from torch.utils.data import DataLoader
 from torchvision import models, transforms
 
@@ -35,7 +34,7 @@ def cifar10_data_loader_factory(
         Path(data_dir).mkdir(parents=True, exist_ok=True)
 
     if not (Path(data_dir) / "cifar-10-batches-py").exists():
-        print(f"{Path(data_dir) / 'cifar-10-batches-py'} 不存在")
+        print(f"{Path(data_dir) / 'cifar-10-batches-py'} 不存在")  # noqa: T201
         torchvision.datasets.CIFAR10(
             root=data_dir,
             train=True,
@@ -48,14 +47,19 @@ def cifar10_data_loader_factory(
             transforms.RandomCrop(32, padding=4),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+            transforms.Normalize(
+                (0.4914, 0.4822, 0.4465),
+                (0.2023, 0.1994, 0.2010),
+            ),
         ],
     )
-
     test_transform = transforms.Compose(
         [
             transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+            transforms.Normalize(
+                (0.4914, 0.4822, 0.4465),
+                (0.2023, 0.1994, 0.2010),
+            ),
         ],
     )
 
@@ -88,10 +92,20 @@ def cifar10_data_loader_factory(
 
 def resnet18_init_fn(
     hyperparameter: Hyperparameter,
+    device: device | None = None,
 ) -> tuple[nn.Module, optim.Optimizer]:
     model = models.resnet18(num_classes=10)
-    model.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+    model.conv1 = nn.Conv2d(
+        3,
+        64,
+        kernel_size=3,
+        stride=1,
+        padding=1,
+        bias=False,
+    )
     model.maxpool = nn.Identity()  # type: ignore[assignment]
+    if device is not None:
+        model.to(device)
     optimizer = optim.SGD(
         model.parameters(),
         lr=hyperparameter.lr,
@@ -122,13 +136,17 @@ def train_step(
     model: nn.Module,
     optimizer: optim.Optimizer,
     train_loader: DataLoader,
-    device: DeviceLikeType = torch.device("cpu"),
+    device: device | None = None,
 ) -> None:
     model.train()
-    criterion = nn.CrossEntropyLoss().to(device)
+    train_device = device if device is not None else torch.device("cpu")
+    criterion = nn.CrossEntropyLoss().to(train_device)
 
     for raw_inputs, raw_targets in islice(train_loader, 1):
-        inputs, targets = raw_inputs.to(device), raw_targets.to(device)
+        inputs, targets = (
+            raw_inputs.to(train_device),
+            raw_targets.to(train_device),
+        )
         optimizer.zero_grad()
         outputs = model(inputs)
         loss = criterion(outputs, targets)
@@ -136,18 +154,41 @@ def train_step(
         optimizer.step()
 
 
+def collect_all_nodes_logs(tuner: ray.ObjectRef) -> None:
+    zip_logs_bytes: bytes = ray.get(tuner.get_zipped_log.remote())  # type: ignore[call-arg]
+    zip_output_dir = f"./logs/{
+        (datetime.now(UTC) + timedelta(hours=8)).strftime('%Y-%m-%d_%H-%M-%S')
+    }/"
+    Path(zip_output_dir).mkdir(parents=True, exist_ok=True)
+    zip_output_path = Path(zip_output_dir) / "logs.zip"
+    with Path(zip_output_path).open("wb") as f:
+        f.write(zip_logs_bytes)
+
+    unzip_file(zip_output_path, zip_output_dir)  # type: ignore[call-arg]
+
+
 def hyperparameter_optimize(tuner_type: TunerType, trial_num: int) -> None:
-    start = perf_counter()
+    start_time = perf_counter()
     ray.init(
         runtime_env={
             "working_dir": ".",
-            "excludes": [".git", "test", "logs/*", "LICENSE", "README.md", ".venv"],
+            "excludes": [
+                ".git",
+                "test",
+                "logs/*",
+                "LICENSE",
+                "README.md",
+                ".venv",
+            ],
         },
     )
     match tuner_type:
         case TunerType.NES:
             distribution: Distribution = Distribution.get_random_ditribution()
-            trial_states = generate_trial_states(trial_num, distribution.get_new_hyper)
+            trial_states = generate_trial_states(
+                trial_num,
+                distribution.get_new_hyper,
+            )
             tuner = NESTuner.options(  # type: ignore[call-arg]
                 max_concurrency=5,
                 num_cpus=1,
@@ -167,18 +208,9 @@ def hyperparameter_optimize(tuner_type: TunerType, trial_num: int) -> None:
             ).remote(trial_states, train_step, cifar10_data_loader_factory)
 
     ray.get(tuner.run.remote())  # type: ignore[call-arg]
+    end_time = perf_counter()
 
-    zip_logs_bytes: bytes = ray.get(tuner.get_zipped_log.remote())  # type: ignore[call-arg]
-
-    zip_output_dir = f"./logs/{
-        (datetime.now(UTC) + timedelta(hours=8)).strftime('%Y-%m-%d_%H-%M-%S')
-    }/"
-    Path(zip_output_dir).mkdir(parents=True, exist_ok=True)
-    zip_output_path = Path(zip_output_dir) / "logs.zip"
-    with Path(zip_output_path).open("wb") as f:
-        f.write(zip_logs_bytes)
-
-    unzip_file(zip_output_path, zip_output_dir)  # type: ignore[call-arg]
+    collect_all_nodes_logs(tuner)
 
     ray.shutdown()
 
@@ -186,7 +218,22 @@ def hyperparameter_optimize(tuner_type: TunerType, trial_num: int) -> None:
     log_dir.mkdir(exist_ok=True)
     log_file = log_dir / "time.log"
     with log_file.open("a") as f:
-        f.write(f"{tuner_type} use time: {perf_counter() - start}\n")
+        f.write(f"{tuner_type} use time: {end_time - start_time}\n")
+
+
+def resolve_tuners(tuner_type: str) -> list[TunerType]:
+    res: list[TunerType] | None = None
+    match tuner_type:
+        case "COM":
+            res = [TunerType.NES, TunerType.PBT]
+        case "NES":
+            res = [TunerType.NES]
+        case "PBT":
+            res = [TunerType.PBT]
+        case _:
+            error_message = f"Unknown tuner type: {tuner_type}"
+            raise ValueError(error_message)
+    return res
 
 
 def main() -> None:
@@ -218,30 +265,13 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    tuners = resolve_tuners(args.tuner_type)
     for _ in repeat(None, args.test_num):
-        match args.tuner_type:
-            case "COM":
-                hyperparameter_optimize(
-                    tuner_type=TunerType.PBT,
-                    trial_num=args.trial_num,
-                )
-                hyperparameter_optimize(
-                    tuner_type=TunerType.NES,
-                    trial_num=args.trial_num,
-                )
-            case "NES":
-                hyperparameter_optimize(
-                    tuner_type=TunerType.NES,
-                    trial_num=args.trial_num,
-                )
-            case "PBT":
-                hyperparameter_optimize(
-                    tuner_type=TunerType.PBT,
-                    trial_num=args.trial_num,
-                )
-            case _:
-                error_message = f"Unknown tuner type: {args.tuner_type}"
-                raise ValueError(error_message)
+        for tuner_type in tuners:
+            hyperparameter_optimize(
+                tuner_type=tuner_type,
+                trial_num=args.trial_num,
+            )
 
 
 if __name__ == "__main__":

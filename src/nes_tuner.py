@@ -14,9 +14,7 @@ from .utils import (
 
 @ray.remote
 class NESTuner(Tuner):
-    __slots__ = {
-        "distribution",
-    }
+    __slots__ = ("distribution",)
 
     def __init__(
         self,
@@ -30,15 +28,16 @@ class NESTuner(Tuner):
             train_step,
             dataloader_factory,
         )
-        self.ditribution: Distribution = distribution
+        self.distribution: Distribution = distribution
 
     def run(self) -> None:
         super().run()
+        history_best = self.trial_result.get_history_best_result()
         log_dir = Path("~/Documents/workspace/shaogu/Ray_PBT/log").expanduser()
         log_dir.mkdir(exist_ok=True)
         log_file = log_dir / "accuracy.log"
         with log_file.open("a") as f:
-            f.write(f"Use NES Accuracy: {self.trial_result.history_best[0]:.6f}\n")
+            f.write(f"Use NES Accuracy: {history_best[0]:.6f}\n")
 
     def should_mutate_trial(self, _: TrialState) -> bool:  # type: ignore[override]
         return True
@@ -57,11 +56,9 @@ class NESTuner(Tuner):
             fitness=accuracy_increment,
             hyperparameter=trial_state.hyperparameter,
         )
-        self.ditribution.update_distribution(fitness=fitness)
-        new_hyper = self.ditribution.get_new_hyper()
+        self.distribution.update_distribution(fitness=fitness)
+        new_hyper = self.distribution.get_new_hyper()
         trial_state.hyperparameter = new_hyper
-
-        trial_state.checkpoint = self.trial_result.history_best[2]
 
         self.logger.info(
             "Trial-%d Iter-%d, 結束mutation, 新超參數: %s",

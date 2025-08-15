@@ -17,11 +17,12 @@ from .utils import Hyperparameter, ModelType
 class PBTTuner(Tuner):
     def run(self) -> None:
         super().run()
+        history_best = self.trial_result.get_history_best_result()
         log_dir = Path("~/Documents/workspace/shaogu/Ray_PBT/log").expanduser()
         log_dir.mkdir(exist_ok=True)
         log_file = log_dir / "accuracy.log"
         with log_file.open("a") as f:
-            f.write(f"Use PBT Accuracy: {self.trial_result.history_best[0]:.6f}\n")
+            f.write(f"Use PBT Accuracy: {history_best[0]:.6f}\n")
 
     def _get_quantile_trial(
         self,
@@ -45,7 +46,7 @@ class PBTTuner(Tuner):
         trial_state.checkpoint = chose_trial.checkpoint
 
         r = random.randint(1, 100)
-        if r <= 25:
+        if r <= 25:  # noqa: PLR2004
             trial_state.hyperparameter = Hyperparameter.random()
         else:
             hyper = chose_trial.hyperparameter
