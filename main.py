@@ -14,16 +14,17 @@ from torch.utils.data import DataLoader
 from torchvision import models, transforms
 
 from src.config import DATASET_PATH, STOP_ITERATION
+from src.group_nes_tuner import GroupNESTuner
 from src.nes_tuner import NESTuner
 from src.pbt_tuner import PBTTuner
 from src.trial_state import TrialState
 from src.utils import (
-    Distribution,
     Hyperparameter,
     TunerType,
     get_head_node_address,
     unzip_file,
 )
+from src.utils_nes import Distribution, DistributionManager
 
 
 def cifar10_data_loader_factory(
@@ -96,8 +97,8 @@ def resnet18_init_fn(
 ) -> tuple[nn.Module, optim.Optimizer]:
     model = models.resnet18(num_classes=10)
     model.conv1 = nn.Conv2d(
-        3,
-        64,
+        in_channels=3,
+        out_channels=64,
         kernel_size=3,
         stride=1,
         padding=1,
@@ -119,17 +120,48 @@ def resnet18_init_fn(
 def generate_trial_states(
     n: int,
     random_fn: Callable | None = None,
+    tuner_type: TunerType = TunerType.PBT,
 ) -> list[TrialState]:
-    fn = Hyperparameter.random if random_fn is None else random_fn
-    return [
-        TrialState(
-            i,
-            fn(),
-            model_init_fn=resnet18_init_fn,
-            stop_iteration=STOP_ITERATION,
-        )
-        for i in range(n)
-    ]
+    match tuner_type:
+        case TunerType.PBT:
+            if random_fn is not None:
+                error_message = "PBT tuner does not support random_fn"
+                raise ValueError(error_message)
+            return [
+                TrialState(
+                    i,
+                    Hyperparameter.get_random_hyper(),
+                    model_init_fn=resnet18_init_fn,
+                    stop_iteration=STOP_ITERATION,
+                )
+                for i in range(n)
+            ]
+        case TunerType.NES:
+            if random_fn is None:
+                error_message = "NES tuner requires a random_fn"
+                raise ValueError(error_message)
+            return [
+                TrialState(
+                    i,
+                    random_fn(),
+                    model_init_fn=resnet18_init_fn,
+                    stop_iteration=STOP_ITERATION,
+                )
+                for i in range(n)
+            ]
+        case TunerType.GROUP_NES:
+            if random_fn is None:
+                error_message = "Group NES tuner requires a random_fn"
+                raise ValueError(error_message)
+            return [
+                TrialState(
+                    i,
+                    random_fn(i),
+                    model_init_fn=resnet18_init_fn,
+                    stop_iteration=STOP_ITERATION,
+                )
+                for i in range(n)
+            ]
 
 
 def train_step(
@@ -155,7 +187,9 @@ def train_step(
 
 
 def collect_all_nodes_logs(tuner: ray.ObjectRef) -> None:
-    zip_logs_bytes: bytes = ray.get(tuner.get_zipped_log.remote())  # type: ignore[call-arg]
+    zip_logs_bytes: bytes = ray.get(
+        tuner.get_zipped_log.remote(),  # type: ignore[call-arg]
+    )
     zip_output_dir = f"./logs/{
         (datetime.now(UTC) + timedelta(hours=8)).strftime('%Y-%m-%d_%H-%M-%S')
     }/"
@@ -184,7 +218,7 @@ def hyperparameter_optimize(tuner_type: TunerType, trial_num: int) -> None:
     )
     match tuner_type:
         case TunerType.NES:
-            distribution: Distribution = Distribution.get_random_ditribution()
+            distribution: Distribution = Distribution.get_random_distribution()
             trial_states = generate_trial_states(
                 trial_num,
                 distribution.get_new_hyper,
@@ -206,6 +240,25 @@ def hyperparameter_optimize(tuner_type: TunerType, trial_num: int) -> None:
                 num_cpus=1,
                 resources={f"node:{get_head_node_address()}": 0.01},
             ).remote(trial_states, train_step, cifar10_data_loader_factory)
+
+        case TunerType.GROUP_NES:
+            manager: DistributionManager = DistributionManager(
+                num_distributions=3,
+            )
+            trial_states = generate_trial_states(
+                trial_num,
+                manager.hyper_init,
+            )
+            tuner = GroupNESTuner.options(  # type: ignore[call-arg]
+                max_concurrency=5,
+                num_cpus=1,
+                resources={f"node:{get_head_node_address()}": 0.01},
+            ).remote(
+                trial_states,
+                train_step,
+                cifar10_data_loader_factory,
+                manager,
+            )
 
     ray.get(tuner.run.remote())  # type: ignore[call-arg]
     end_time = perf_counter()
@@ -243,9 +296,9 @@ def main() -> None:
         "-T",
         type=str,
         choices=["NES", "PBT", "COM"],
-        default="COM",
+        default="COM(comparison PBT and NES)",
         dest="tuner_type",
-        help="Select the Tuner type of NES, PBT or COM(comparison PBT and NES)",
+        help="Select the Tuner type",
     )
     parser.add_argument(
         "--test_num",

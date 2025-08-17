@@ -16,15 +16,13 @@ class TrialPhase:
     ) -> None:
         self.current_phase = 0
         self.first_phase = 0
-        self.last_phase = max(
-            stop_iteration // iteration_per_phase
-            - (
-                1
-                if stop_iteration % iteration_per_phase < iteration_per_phase // 2
-                else 0
-            ),
-            0,
-        )
+
+        self.last_phase = stop_iteration // iteration_per_phase
+        if self.last_phase > 0 and (stop_iteration % iteration_per_phase) < (
+            iteration_per_phase // 2
+        ) :
+            self.last_phase -= 1
+
         self.thresholds = [
             i * iteration_per_phase
             for i in range(self.first_phase, self.last_phase + 1)

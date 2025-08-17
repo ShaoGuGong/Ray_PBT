@@ -5,26 +5,26 @@ import ray
 from .trial_state import TrialState
 from .tuner import Tuner
 from .utils import DataloaderFactory, TrainStepFunction
-from .utils_nes import Distribution, Fitness
+from .utils_nes import DistributionManager, Fitness
 
 
 @ray.remote
-class NESTuner(Tuner):
-    __slots__ = ("distribution",)
+class GroupNESTuner(Tuner):
+    __slots__ = ("distribution_manager",)
 
     def __init__(
         self,
         trial_states: list[TrialState],
         train_step: TrainStepFunction,
         dataloader_factory: DataloaderFactory,
-        distribution: Distribution,
+        distribution_manager: DistributionManager,
     ) -> None:
         super().__init__(
             trial_states,
             train_step,
             dataloader_factory,
         )
-        self.distribution: Distribution = distribution
+        self.distribution_manager: DistributionManager = distribution_manager
 
     def run(self) -> None:
         super().run()
@@ -55,8 +55,13 @@ class NESTuner(Tuner):
             fitness=accuracy_increment,
             hyperparameter=trial_state.hyperparameter,
         )
-        self.distribution.update_distribution(fitness=fitness)
-        new_hyper = self.distribution.get_new_hyper()
+        self.distribution_manager.update_distribution(
+            trial_id=trial_state.id,
+            fitness=fitness,
+        )
+        new_hyper = self.distribution_manager.get_new_hyper(
+            trial_id=trial_state.id,
+        )
         trial_state.hyperparameter = new_hyper
 
         self.logger.info(

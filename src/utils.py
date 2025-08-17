@@ -1,8 +1,6 @@
 import logging
-import math
 import random
 import zipfile
-from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -14,7 +12,6 @@ from typing import Any, Protocol, TypeVar
 import numpy as np
 import ray
 from numpy._typing import NDArray
-from scipy.linalg import expm
 from torch import device, nn, optim
 from torch.utils.data import DataLoader
 
@@ -26,6 +23,7 @@ from torch.utils.data import DataLoader
 class TunerType(Enum):
     NES = auto()
     PBT = auto()
+    GROUP_NES = auto()
 
 
 class ModelType(Enum):
@@ -88,7 +86,8 @@ class Hyperparameter:
     def __str__(self) -> str:
         return (
             f"Hyperparameter(lr:{self.lr:.6f}, momentum:{self.momentum:.6f}, "
-            f"weight_decay:{self.weight_decay:.6f}, dampening:{self.dampening:.6f}, "
+            f"weight_decay:{self.weight_decay:.6f},"
+            f" dampening:{self.dampening:.6f}, "
             f"batch_size:{self.batch_size:4d}, model_type:{self.model_type})"
         )
 
@@ -104,7 +103,7 @@ class Hyperparameter:
         )
 
     @classmethod
-    def random(cls) -> "Hyperparameter":
+    def get_random_hyper(cls) -> "Hyperparameter":
         return cls(
             lr=random.uniform(1e-4, 1e-1),
             momentum=random.uniform(1e-4, 1e-1),
@@ -112,208 +111,6 @@ class Hyperparameter:
             dampening=random.uniform(1e-7, 1e-4),
             batch_size=int(random.uniform(0.0, 1.0) * 480.0 + 32),
             model_type=ModelType.RESNET_18,
-        )
-
-
-@dataclass(slots=True)
-class Fitness:
-    fitness: float
-    hyperparameter: Hyperparameter
-
-
-@dataclass(slots=True)
-class NaturalGradients:
-    sigma_gradient: np.floating
-    delta_gradient: NDArray[np.floating]
-    b_gradient: NDArray[np.floating]
-
-    def __str__(self) -> str:
-        return (
-            f"NaturalGradients(sigma_gradient: {self.sigma_gradient:.3f}, "
-            f"delta_gradient: {self.delta_gradient}, "
-            f"b_gradient: {self.b_gradient})"
-        )
-
-
-@dataclass(slots=True)
-class Distribution:
-    mean: NDArray[np.floating]
-    sigma: float
-    b_matrix: NDArray[np.floating]
-    fitnesses: deque[Fitness]
-    previous_gradients: NaturalGradients | None
-
-    @staticmethod
-    def fitness_shaping(fitnesses: list[Fitness]) -> list:
-        """
-        Fitness Shaping use
-
-        Args:
-            fitness: model's fitness.
-
-        Returns:
-            List[float]: Returns utility.
-
-        Raises:
-            ZeroDivisionError: if length of fitnesses is zero.
-        """
-        #                            ╭───────────────────────╮
-        #                            │ NES'S Fitness Shaping │
-        #                            ╰───────────────────────╯
-        size = len(fitnesses)
-        if size == 0:
-            raise ZeroDivisionError
-        base = math.log(size / 2 + 1)
-        utilities_raw = [max(0.0, base - math.log(i + 1)) for i in range(size)]
-        denominator = sum(utilities_raw)
-        return [u / denominator - 1.0 / size for u in utilities_raw]
-
-    @classmethod
-    def get_random_ditribution(cls) -> "Distribution":
-        init_hyper = np.concatenate(
-            [
-                np.random.uniform(  # noqa:NPY002
-                    1e-4,
-                    1e-1,
-                    size=2,
-                ),
-                np.random.uniform(  # noqa:NPY002
-                    1e-7,
-                    1e-6,
-                    size=2,
-                ),
-                np.random.uniform(  # noqa:NPY002
-                    0.0,
-                    1.0,
-                    size=1,
-                ),
-            ],
-        )
-
-        diag_vals = np.random.uniform(0.1, 0.333, size=len(init_hyper)) * init_hyper  # noqa: NPY002
-        covariance = np.diag(diag_vals)
-        square_root_of_covariance = np.linalg.cholesky(covariance).T
-        mean = np.array(init_hyper)
-        sigma = abs(np.linalg.det(square_root_of_covariance)) ** (1 / len(init_hyper))
-        b_matrix = square_root_of_covariance / sigma
-        population_size = 4 + int(3 * np.log(len(mean)))
-
-        return cls(
-            mean=mean,
-            sigma=sigma,
-            b_matrix=b_matrix,
-            fitnesses=deque(maxlen=population_size),
-            previous_gradients=None,
-        )
-
-    def get_new_hyper(self) -> Hyperparameter:
-        modified_sample: np.ndarray | None = None
-        while modified_sample is None or np.any(
-            (modified_sample <= 0.0) | (modified_sample >= 1.0),
-        ):
-            sample: NDArray[np.floating] = np.random.multivariate_normal(  # noqa: NPY002
-                mean=np.zeros(self.mean.size),
-                cov=np.eye(self.mean.size),
-            )
-            modified_sample = self.mean + self.sigma * (self.b_matrix @ sample)
-        parameter: list[float] = modified_sample.tolist()
-        return Hyperparameter(
-            *parameter[:-1],
-            batch_size=int(parameter[-1] * 480.0 + 32),
-            model_type=ModelType.RESNET_18,
-        )
-
-    def update_distribution(self, fitness: Fitness) -> None:
-        self.fitnesses.append(fitness)
-        dimension = len(self.mean)
-        population_size = 4 + int(3 * np.log(dimension))
-        if len(self.fitnesses) < population_size:
-            if len(self.fitnesses) == 1:
-                log_dir = Path("~/Documents/workspace/shaogu/Ray_PBT/log/").expanduser()
-                log_dir.mkdir(exist_ok=True)
-                log_file = log_dir / "nes.log"
-                with log_file.open("w") as f:
-                    message = (
-                        "\033[1;91mTune Start Distribution\033[0m\n"
-                        f"Distribution(mean:{self.mean}"
-                        f", sigma:{self.sigma}, b_matrix:{self.b_matrix})"
-                    )
-                    f.write(message)
-                    f.write("\n")
-            return
-
-        mean_stride = 1.0 / dimension
-        b_matrix_stride = (
-            (9 + 3 * np.log(dimension))
-            / (5 * dimension * np.sqrt(dimension))
-            / dimension
-        )
-        sigma_stride = (
-            (9 + 3 * np.log(dimension))
-            / (5 * dimension * np.sqrt(dimension))
-            / dimension
-        )
-
-        gradients: NaturalGradients = self._compute_gradient()
-        self.mean = self.mean + (
-            mean_stride * self.sigma * (self.b_matrix @ gradients.delta_gradient)
-        )
-        self.sigma = self.sigma * np.exp((sigma_stride / 2) * gradients.sigma_gradient)
-        self.b_matrix = self.b_matrix @ expm(
-            (b_matrix_stride / 2) * gradients.b_gradient,
-        )
-        log_dir = Path("~/Documents/workspace/shaogu/Ray_PBT/log/").expanduser()
-        log_dir.mkdir(exist_ok=True)
-        log_file = log_dir / "nes.log"
-        with log_file.open("a") as f:
-            message = (
-                f"Distribution(mean:{self.mean}"
-                f", sigma:{self.sigma}, b_matrix:{self.b_matrix})"
-            )
-
-            f.write(message)
-            f.write("\n")
-
-    def _compute_gradient(
-        self,
-    ) -> NaturalGradients:
-        """
-        Compute the natural gradient from the fitnesses.
-
-        Returns:
-            NaturalGradients: The computed natural gradients.
-        """
-        sorted_fitnesses = sorted(self.fitnesses, key=lambda x: x.fitness, reverse=True)
-        utilities = Distribution.fitness_shaping(sorted_fitnesses)
-        shaping_fitnesses = [
-            (utility, fitness.hyperparameter)
-            for utility, fitness in zip(utilities, sorted_fitnesses, strict=True)
-        ]
-        delta_gradient = np.sum(
-            [u * h.to_ndarray() for u, h in shaping_fitnesses],
-            axis=0,
-        )
-        m_gradient = np.sum(
-            [
-                u
-                * (
-                    np.outer(
-                        h.to_ndarray(),
-                        h.to_ndarray(),
-                    )
-                    - np.eye(self.mean.size)
-                )
-                for u, h in shaping_fitnesses
-            ],
-            axis=0,
-        )
-        sigma_gradient = np.trace(m_gradient) / self.mean.size
-        b_gradient = m_gradient - sigma_gradient * np.eye(self.mean.size)
-
-        return NaturalGradients(
-            sigma_gradient=sigma_gradient,
-            delta_gradient=delta_gradient,
-            b_gradient=b_gradient,
         )
 
 
@@ -394,7 +191,8 @@ def colored_progress_bar(data: list[int], bar_width: int) -> str:
         lengths[max_idx] += 1
 
     bar = "".join(
-        colors[i % len(colors)] + "━" * length for i, length in enumerate(lengths)
+        colors[i % len(colors)] + "━" * length
+        for i, length in enumerate(lengths)
     )
     bar += reset
 
@@ -410,7 +208,9 @@ def unzip_file(zip_path: str, extract_to: str) -> None:
 
 
 def get_tuner_logger() -> logging.Logger:
-    timestamp = (datetime.now(UTC) + timedelta(hours=8)).strftime("%Y-%m-%d_%H-%M-%S")
+    timestamp = (datetime.now(UTC) + timedelta(hours=8)).strftime(
+        "%Y-%m-%d_%H-%M-%S",
+    )
     log_dir = Path(Path.cwd()) / "logs" / timestamp
     Path(log_dir).mkdir(parents=True, exist_ok=True)
 
@@ -434,3 +234,26 @@ def get_tuner_logger() -> logging.Logger:
         logger.addHandler(file_handler)
 
     return logger
+
+
+# ╭──────────────────────────────────────────────────────────╮
+# │                          String                          │
+# ╰──────────────────────────────────────────────────────────╯
+
+LOG_TABLE_HEAD: str = (
+    f"┏{'':━^4}┳{'':━^11}┳{'':━^11}┳"
+    f"{'':━^37}┳{'':━^3}┳{'':━^7}┳{'':━^7}┓\n"
+    f"┃{'':^4}┃{'':^11}┃{'Worker':^11}┃"
+    f"{'Hyparameter':^37}┃{'':^3}┃{'':^7}┃{'':^7}┃\n"
+    f"┃{'ID':^4}┃{'Status':^11}┣{'':━^4}┳{'':━^6}╋"
+    f"{'':━^7}┳{'':━^10}┳{'':━^6}┳{'':━^11}┫{'Ph':^3}┃{'Iter':^7}┃{'Acc':^7}┃\n"
+    f"┃{'':^4}┃{'':^11}┃{'ID':^4}┃{'TYPE':^6}┃{'lr':^7}┃"
+    f"{'momentum':^10}┃{'bs':^6}┃{'model':^11}┃{'':^3}┃{'':^7}┃{'':^7}┃\n"
+    f"┣{'':━^4}╋{'':━^11}╋{'':━^4}╋{'':━^6}╋{'':━^7}╋"
+    f"{'':━^10}╋{'':━^6}╋{'':━^11}╋{'':━^3}╋{'':━^7}╋{'':━^7}┫\n"
+)
+
+LOG_TABLE_TAIL: str = (
+    f"┗{'':━^4}┻{'':━^11}┻{'':━^4}┻{'':━^6}┻{'':━^7}┻"
+    f"{'':━^10}┻{'':━^6}┻{'':━^11}┻{'':━^3}┻{'':━^7}┻{'':━^7}┛\n"
+)

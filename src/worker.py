@@ -87,7 +87,9 @@ def get_worker_logger(worker_id: int) -> logging.Logger:
         stream_handler.setFormatter(formatter)
         logger.addHandler(stream_handler)
 
-        file_handler = logging.FileHandler(Path(log_dir) / f"worker-{worker_id}.log")
+        file_handler = logging.FileHandler(
+            Path(log_dir) / f"worker-{worker_id}.log",
+        )
         file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
@@ -142,7 +144,9 @@ class Worker:
         self.worker_state: WorkerState = worker_state
         self.active_trials: dict[int, TrialState] = {}
         self.train_step: TrainStepFunction = train_step
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu",
+        )
         self.logger = get_worker_logger(worker_id=worker_state.id)
         self.tuner: ActorHandle = tuner
         self.mutation_iteration: int = MUTATION_ITERATION
@@ -155,7 +159,10 @@ class Worker:
 
     def send_signal(self, trial_id: int) -> None:
         if trial_id not in self.active_trials:
-            self.log("info", f"TRIAL_ID: {trial_id}不存在, {self.active_trials.keys()}")
+            self.log(
+                "info",
+                f"TRIAL_ID: {{trial_id}}不存在, {self.active_trials.keys()}",
+            )
             return
         self.log("info", f"接收到訊號 trial: {trial_id}")
         self.interrupt_set.add(trial_id)
@@ -179,7 +186,11 @@ class Worker:
         trial_state.worker_id = self.worker_state.id
         trial_state.worker_type = self.worker_state.worker_type
         ray.wait(
-            [self.tuner.record_trial_progress.remote(trial_state.without_checkpoint())],
+            [
+                self.tuner.record_trial_progress.remote(
+                    trial_state.without_checkpoint(),
+                ),
+            ],
             timeout=0.1,
         )  # type: ignore[reportGeneralTypeIssues]
         self.log("info", f"Running Trials: {list(self.active_trials)}")
@@ -199,23 +210,32 @@ class Worker:
                     TrialStatus.NEED_MUTATION,
                 }:
                     update_result_futures.append(
-                        self.tuner.submit_trial.remote(trial_state),  # type: ignore[reportGeneralTypeIssues]
+                        self.tuner.submit_trial.remote(
+                            trial_state,
+                        ),  # type: ignore[reportGeneralTypeIssues]
                     )
                     self.active_trials.pop(trial_state.id)
                     self.trial_current_iteration.pop(trial_state.id)
 
                 elif status == TrialStatus.INTERRUPTED:
                     update_result_futures.append(
-                        self.tuner.submit_trial.remote(trial_state),  # type: ignore[reportGeneralTypeIssues]
+                        self.tuner.submit_trial.remote(
+                            trial_state,
+                        ),  # type: ignore[reportGeneralTypeIssues]
                     )
                     self.active_trials.pop(trial_state.id)
                     self.trial_current_iteration.pop(trial_state.id)
                     continue
 
                 update_result_futures.append(
-                    self.tuner.update_trial_result.remote(trial_state),  # type: ignore[reportGeneralTypeIssues]
+                    self.tuner.update_trial_result.remote(
+                        trial_state,
+                    ),  # type: ignore[reportGeneralTypeIssues]
                 )
-            ray.wait(update_result_futures, timeout=0.1)  # type: ignore[reportGeneralTypeIssues]
+            ray.wait(
+                update_result_futures,
+                timeout=0.1,
+            )  # type: ignore[reportGeneralTypeIssues]
 
     def get_active_trials_nums(self) -> int:
         """
@@ -260,7 +280,10 @@ class Worker:
 
         return model, optimizer, train_loader, test_loader
 
-    def train(self, trial_state: TrialState) -> TrialState:  # noqa: PLR0911, C901
+    def train(  # noqa: PLR0911, C901
+        self,
+        trial_state: TrialState,
+    ) -> TrialState:
         """
         執行試驗的訓練流程。
 
@@ -273,8 +296,10 @@ class Worker:
         self.log("info", "開始訓練", trial_id=trial_state.id)
         self.log("debug", f"{torch.cuda.is_available()=}")
 
-        model, optimizer, train_loader, test_loader = self.get_training_attributes(
-            trial_state=trial_state,
+        model, optimizer, train_loader, test_loader = (
+            self.get_training_attributes(
+                trial_state=trial_state,
+            )
         )
 
         while True:
@@ -313,7 +338,8 @@ class Worker:
             # GPU 是否達到次數上限
             if (
                 self.worker_state.worker_type == WorkerType.GPU
-                and self.trial_current_iteration[trial_state.id] >= GPU_MAX_ITERATION
+                and self.trial_current_iteration[trial_state.id]
+                >= GPU_MAX_ITERATION
             ):
                 self.log("info", "已達到 GPU_MAX_ITERATION 次數")
                 self.pause_trial(trial_state)
@@ -338,7 +364,9 @@ class Worker:
             trial_state.iteration += 1
             self.trial_current_iteration[trial_state.id] += 1
             trial_state.phase = self.trial_phase.get_trial_phase(trial_state)
-            trial_state.device_iteration_count[self.worker_state.worker_type] += 1
+            trial_state.device_iteration_count[
+                self.worker_state.worker_type
+            ] += 1
 
             if trial_state.iteration % self.mutation_iteration == 0:
                 break
@@ -366,10 +394,16 @@ class Worker:
             return trial_state
 
         ray.get(
-            self.tuner.record_trial_progress.remote(trial_state.without_checkpoint()),  # type: ignore[reportGeneralTypeIssues]
+            self.tuner.record_trial_progress.remote(
+                trial_state.without_checkpoint(),
+            ),  # type: ignore[reportGeneralTypeIssues]
         )
 
-        if ray.get(self.tuner.should_mutate_trial.remote(trial_state)):  # type: ignore[reportGeneralTypeIssues]
+        if ray.get(
+            self.tuner.should_mutate_trial.remote(
+                trial_state,  # type: ignore[reportGeneralTypeIssues]
+            ),
+        ):  # type: ignore[reportGeneralTypeIssues]
             self.need_mutation_trial(trial_state)
         trial_state.update_checkpoint(model, optimizer)
         return trial_state
@@ -445,7 +479,9 @@ class Worker:
         with Path(log_dir).open("r") as f:
             return {"id": self.worker_state.id, "content": f.read()}
 
-    def log(self, level: str, message: str, trial_id: int | str = "N/A") -> None:
+    def log(
+        self, level: str, message: str, trial_id: int | str = "N/A",
+    ) -> None:
         """
         根據指定的 log 級別輸出訊息。
 
@@ -540,7 +576,9 @@ def generate_all_workers(
                 if node_address == head_node_address:
                     visited_address.add(node_address)
                     continue
-                cpus = min(resource.get("CPU", 1) - cpus_usage_of_none_cpu_workers, 1)
+                cpus = min(
+                    resource.get("CPU", 1) - cpus_usage_of_none_cpu_workers, 1,
+                )
 
                 worker_states.append(
                     WorkerState(

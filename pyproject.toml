@@ -115,5 +115,6 @@ dependencies = [
 ]
 
 [tool.ruff]
+line-length = 80
 select = ["ALL"]
 ignore = ["S", "D"]

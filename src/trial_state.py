@@ -11,6 +11,8 @@ from .config import (
     TRIAL_PROGRESS_OUTPUT_PATH,
 )
 from .utils import (
+    LOG_TABLE_HEAD,
+    LOG_TABLE_TAIL,
     Checkpoint,
     Hyperparameter,
     ModelInitFunction,
@@ -51,7 +53,8 @@ class TrialState:
         if not without_checkpoint:
             if model_init_fn is None:
                 msg = (
-                    f"TrialState(id={self.id}) requires a model_factory to create model"
+                    f"TrialState(id={self.id})"
+                    " requires a model_factory to create model"
                     "and optimizer unless `without_checkpoint=True`"
                 )
                 raise ValueError(msg)
@@ -64,7 +67,11 @@ class TrialState:
             self.checkpoint = Checkpoint({}, {})
             self.update_checkpoint(model, optimizer)
 
-    def update_checkpoint(self, model: nn.Module, optimizer: optim.Optimizer) -> None:
+    def update_checkpoint(
+        self,
+        model: nn.Module,
+        optimizer: optim.Optimizer,
+    ) -> None:
         if self.checkpoint is None:
             self.checkpoint = Checkpoint({}, {})
 
@@ -141,7 +148,9 @@ class TrialResult:
         ratio: float = 0.25,
     ) -> tuple[list[TrialState], list[TrialState]]:
         trials = [
-            trial for trial in self.trial_progress.values() if trial.accuracy != 0
+            trial
+            for trial in self.trial_progress.values()
+            if trial.accuracy != 0
         ]
         min_trials = 2
         if len(trials) < min_trials:
@@ -161,13 +170,7 @@ class TrialResult:
     ) -> None:
         try:
             with Path(output_path).open("w") as f:
-                f.write(
-                    f"┏{'':━^4}┳{'':━^11}┳{'':━^11}┳{'':━^37}┳{'':━^3}┳{'':━^7}┳{'':━^7}┓\n"
-                    f"┃{'':^4}┃{'':^11}┃{'Worker':^11}┃{'Hyparameter':^37}┃{'':^3}┃{'':^7}┃{'':^7}┃\n"
-                    f"┃{'ID':^4}┃{'Status':^11}┣{'':━^4}┳{'':━^6}╋{'':━^7}┳{'':━^10}┳{'':━^6}┳{'':━^11}┫{'Ph':^3}┃{'Iter':^7}┃{'Acc':^7}┃\n"
-                    f"┃{'':^4}┃{'':^11}┃{'ID':^4}┃{'TYPE':^6}┃{'lr':^7}┃{'momentum':^10}┃{'bs':^6}┃{'model':^11}┃{'':^3}┃{'':^7}┃{'':^7}┃\n"
-                    f"┣{'':━^4}╋{'':━^11}╋{'':━^4}╋{'':━^6}╋{'':━^7}╋{'':━^10}╋{'':━^6}╋{'':━^11}╋{'':━^3}╋{'':━^7}╋{'':━^7}┫\n",
-                )
+                f.write(LOG_TABLE_HEAD)
 
                 for i in self.trial_progress.values():
                     worker_type = "None"
@@ -180,11 +183,13 @@ class TrialResult:
                     if i.worker_id != -1:
                         worker_id = i.worker_id
                     f.write(
-                        f"┃{i.id:>4}┃{i.status:^11}┃{worker_id:>4}┃{worker_type:^6}┃{h.lr:>7.3f}┃{h.momentum:>10.3f}┃{h.batch_size:>6}┃{h.model_type:^11}┃{i.phase:>3}┃{i.iteration:>7}┃{i.accuracy:>7.3f}┃\n",
+                        f"┃{i.id:>4}┃{i.status:^11}┃{worker_id:>4}┃"
+                        f"{worker_type:^6}┃{h.lr:>7.3f}┃{h.momentum:>10.3f}┃"
+                        f"{h.batch_size:>6}┃{h.model_type:^11}┃{i.phase:>3}┃"
+                        f"{i.iteration:>7}┃{i.accuracy:>7.3f}┃\n",
                     )
-                f.write(
-                    f"┗{'':━^4}┻{'':━^11}┻{'':━^4}┻{'':━^6}┻{'':━^7}┻{'':━^10}┻{'':━^6}┻{'':━^11}┻{'':━^3}┻{'':━^7}┻{'':━^7}┛\n",
-                )
+
+                f.write(LOG_TABLE_TAIL)
 
         except Exception as e:  # noqa: BLE001
             print(f"{e}")  # noqa: T201

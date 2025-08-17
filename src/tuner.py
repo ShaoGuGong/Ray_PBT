@@ -35,7 +35,9 @@ class Tuner:
         self.logger = get_tuner_logger()
 
         self.logger.info("總共 %d 個 Trial", len(self.trial_states))
-        self.logger.info("\n".join([str(t.hyperparameter) for t in self.trial_states]))
+        self.logger.info("\n".join([
+            str(t.hyperparameter) for t in self.trial_states
+        ]))
 
         self.workers = generate_all_workers(
             ray.get_runtime_context().current_actor,

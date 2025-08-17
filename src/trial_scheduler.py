@@ -1,7 +1,7 @@
 import logging
-import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from time import perf_counter, sleep
 
 import ray
 from ray import ObjectRef
@@ -21,7 +21,10 @@ def cpu_scheduling(
     if not pending_trial_states:
         return
 
-    slot_refs: list = [worker.get_available_slots.remote() for worker in cpu_workers]
+    slot_refs: list = [
+        worker.get_available_slots.remote() for worker in cpu_workers
+    ]
+
     wait_futures, _ = ray.wait(slot_refs, num_returns=1)
     available_futures = ray.get(wait_futures)
 
@@ -50,7 +53,11 @@ def cpu_scheduling(
     trial_state = max(available_trials, key=lambda x: x.iteration)
     worker = next(iter(available_cpu_workers))
     pending_trial_states.remove(trial_state)
-    ray.get(worker.assign_trial.remote(trial_state))  # type: ignore[reportGeneralTypeIssues]
+    ray.get(
+        worker.assign_trial.remote(
+            trial_state,
+        ),  # type: ignore[reportGeneralTypeIssues]
+    )
 
 
 def gpu_scheduling(
@@ -60,7 +67,10 @@ def gpu_scheduling(
     if not pending_trial_states:
         return
 
-    slot_refs: list = [worker.get_available_slots.remote() for worker in gpu_workers]
+    slot_refs: list = [
+        worker.get_available_slots.remote() for worker in gpu_workers
+    ]
+
     wait_futures, _ = ray.wait(slot_refs, num_returns=len(slot_refs))
     available_futures = ray.get(wait_futures)
 
@@ -81,7 +91,11 @@ def gpu_scheduling(
     trial_state = min(pending_trial_states, key=lambda x: x.iteration)
 
     pending_trial_states.remove(trial_state)
-    ray.get(worker.assign_trial.remote(trial_state))  # type: ignore[reportGeneralTypeIssues]
+    ray.get(
+        worker.assign_trial.remote(
+            trial_state,
+        ),  # type: ignore[reportGeneralTypeIssues]
+    )
 
 
 def round_robin_strategy(
@@ -94,13 +108,17 @@ def round_robin_strategy(
         return
 
     # Assign to CPU
-    available_futures = [worker.get_available_slots.remote() for worker in cpu_workers]
+    available_futures = [
+        worker.get_available_slots.remote() for worker in cpu_workers
+    ]
 
     available_cpu_workers = [
         worker
         for worker, available_slots in zip(
             cpu_workers,
-            ray.get(available_futures),  # type: ignore[reportGeneralTypeIssues]
+            ray.get(
+                available_futures,  # type: ignore[reportGeneralTypeIssues]
+            ),
             strict=True,
         )
         if available_slots
@@ -125,7 +143,9 @@ def round_robin_strategy(
             return
 
     # Assign to GPU
-    available_futures = [worker.get_available_slots.remote() for worker in gpu_workers]
+    available_futures = [
+        worker.get_available_slots.remote() for worker in gpu_workers
+    ]
 
     available_gpu_workers = [
         (worker, available_slots)
@@ -164,9 +184,14 @@ def gpu_stealing_strategy(
     ]
 
     if running_cpu_workers:
-        worker, trial_state = min(running_cpu_workers, key=lambda x: x[1].iteration)
+        worker, trial_state = min(
+            running_cpu_workers, key=lambda x: x[1].iteration,
+        )
         logger.info("對 Trial %d 執行搶奪", trial_state.id)
-        ray.wait([worker.send_signal.remote(trial_state.id)], timeout=0.1)  # type: ignore[reportGeneralTypeIssues]
+        ray.wait(
+            [worker.send_signal.remote(trial_state.id)],
+            timeout=0.1,
+        )  # type: ignore[reportGeneralTypeIssues]
 
 
 def get_trial_scheduler_logger() -> logging.Logger:
@@ -178,7 +203,9 @@ def get_trial_scheduler_logger() -> logging.Logger:
     Returns:
         logging.Logger: 配置好的 TrialScheduler 記錄器。
     """
-    timestamp = (datetime.now(UTC) + timedelta(hours=8)).strftime("%Y-%m-%d_%H-%M-%S")
+    timestamp = (datetime.now(UTC) + timedelta(hours=8)).strftime(
+        "%Y-%m-%d_%H-%M-%S",
+    )
     log_dir = Path.cwd() / "logs" / timestamp
     Path(log_dir).mkdir(parents=True, exist_ok=True)
 
@@ -196,7 +223,9 @@ def get_trial_scheduler_logger() -> logging.Logger:
         stream_handler.setFormatter(formatter)
         logger.addHandler(stream_handler)
 
-        file_handler = logging.FileHandler(Path(log_dir) / "trial_scheduler.log")
+        file_handler = logging.FileHandler(
+            Path(log_dir) / "trial_scheduler.log",
+        )
         file_handler.setLevel(logging.DEBUG)  # 記錄所有級別的日誌
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
@@ -251,22 +280,31 @@ class TrialScheduler:
         self.workers: list[ActorHandle] = workers
         self.is_final_phase: bool = False
 
-        ray.wait([worker.run.remote() for worker in self.workers], timeout=0.1)  # type: ignore[reportGeneralTypeIssues]
+        ray.wait(
+            [worker.run.remote() for worker in self.workers],
+            timeout=0.1,
+        )  # type: ignore[reportGeneralTypeIssues]
 
         self.gpu_workers = [
             worker
             for worker in self.workers
-            if ray.get(worker.get_worker_type.remote()) == WorkerType.GPU  # type: ignore[reportGeneralTypeIssues]
+            if ray.get(  # type: ignore[reportGeneralTypeIssues]
+                worker.get_worker_type.remote(),  # type: ignore noqa
+            )
+            == WorkerType.GPU
         ]
         self.cpu_workers = [
             worker
             for worker in self.workers
-            if ray.get(worker.get_worker_type.remote()) == WorkerType.CPU  # type:ignore[reportGeneralTypeIssues]
+            if ray.get(  # type: ignore[reportGeneralTypeIssues]
+                worker.get_worker_type.remote(),  # type: ignore noqa
+            )
+            == WorkerType.CPU
         ]
 
         self.logger.info("初始化完成")
 
-    def assign_trial_to_worker(self) -> None:  # type: ignore[reportGeneralTypeIssues]
+    def assign_trial_to_worker(self) -> None:
         """
         將一個試驗分配給一個可用的工作者。
 
@@ -308,7 +346,8 @@ class TrialScheduler:
                 trial_state.status = TrialStatus.PENDING
                 self.pending_trial_states.append(trial_state)
                 self.logger.info(
-                    "🔃 Worker %d 回傳未完成 Trial %d, Iteration: %d, Accuracy: %.2f",
+                    "🔃 Worker %d 回傳未完成 Trial %d"
+                    ", Iteration: %d, Accuracy: %.2f",
                     trial_state.worker_id,
                     trial_state.id,
                     trial_state.iteration,
@@ -316,9 +355,16 @@ class TrialScheduler:
                 )
 
             case TrialStatus.NEED_MUTATION:
-                trial_state = ray.get(self.tuner.mutate_trial.remote(trial_state))  # type: ignore[reportGeneralTypeIssues]
+                trial_state = ray.get(
+                    self.tuner.mutate_trial.remote(
+                        trial_state,
+                    ),  # type: ignore noqa
+                )  # type: ignore[reportGeneralTypeIssues]
                 if trial_state.checkpoint is None:
-                    self.logger.debug("Trial %d checkpoint is None", trial_state.id)
+                    self.logger.debug(
+                        "Trial %d checkpoint is None",
+                        trial_state.id,
+                    )
                 trial_state.status = TrialStatus.PENDING
                 self.pending_trial_states.append(trial_state)
 
@@ -354,13 +400,17 @@ class TrialScheduler:
         該方法會持續運行直到所有的試驗都完成。
         """
         self.logger.info("訓練開始")
-        update_phase_time = time.perf_counter()
+        last_update_time = perf_counter()
         while len(self.completed_trial_states) < self.trial_state_nums:
             self.assign_trial_to_worker()
-            time.sleep(2.0)
-            if current_time := time.perf_counter() - update_phase_time > 60.0:  # noqa: PLR2004
+            sleep(2.0)
+            update_time = 60.0
+            if (
+                current_time := (perf_counter() - last_update_time)
+                > update_time
+            ):
                 self.update_phase()
-                update_phase_time = current_time
+                last_update_time = current_time
 
         self.print_iteration_count()
         self.logger.info("🎉 所有 Trial 訓練完成!")
@@ -369,7 +419,8 @@ class TrialScheduler:
 
     def print_iteration_count(self) -> None:
         iteration_counts = [
-            (i.id, i.device_iteration_count) for i in self.completed_trial_states
+            (i.id, i.device_iteration_count)
+            for i in self.completed_trial_states
         ]
 
         iteration_counts.sort(key=lambda x: x[0])
@@ -410,18 +461,30 @@ class TrialScheduler:
             return
 
         for worker in self.workers:
-            future = ray.get(worker.get_log_file.remote())  # type: ignore[reportGeneralTypeIssues]
+            future = ray.get(  # type: ignore[reportGeneralTypeIssues]
+                worker.get_log_file.remote(),  # type: ignore noqa
+            )
             with (Path(log_dir) / f"worker-{future['id']}.log").open("w") as f:
                 f.write(future["content"])
 
     def update_phase(self) -> None:
         old = self.trial_phase.current_phase
-        self.trial_phase.update_phase(ray.get(self.tuner.get_trial_progress.remote()))  # type: ignore[reportGeneralTypeIssues]
+        self.trial_phase.update_phase(
+            ray.get(  # type: ignore[reportGeneralTypeIssues]
+                self.tuner.get_trial_progress.remote(),  # type: ignore noqa
+            ),
+        )
 
         if old != self.trial_phase.current_phase:
-            self.logger.info("更新階段到Phase %d", self.trial_phase.current_phase)
+            self.logger.info(
+                "更新階段到Phase %d",
+                self.trial_phase.current_phase,
+            )
             futures = [
                 worker.update_phase.remote(self.trial_phase.current_phase)
                 for worker in self.workers
             ]
-            ray.wait(futures, timeout=0.1)  # type: ignore[reportGeneralTypeIssues]
+            ray.wait(
+                futures,
+                timeout=0.1,
+            )  # type: ignore[reportGeneralTypeIssues]

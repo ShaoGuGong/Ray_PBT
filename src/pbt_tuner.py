@@ -47,7 +47,7 @@ class PBTTuner(Tuner):
 
         r = random.randint(1, 100)
         if r <= 25:  # noqa: PLR2004
-            trial_state.hyperparameter = Hyperparameter.random()
+            trial_state.hyperparameter = Hyperparameter.get_random_hyper()
         else:
             hyper = chose_trial.hyperparameter
             perturbation = np.array(
