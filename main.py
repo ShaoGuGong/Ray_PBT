@@ -13,7 +13,7 @@ from torch import device, nn, optim
 from torch.utils.data import DataLoader
 from torchvision import models, transforms
 
-from src.config import DATASET_PATH, STOP_ITERATION
+from src.config import DATASET_PATH, STOP_ITERATION, TEST_NUM, TRIAL_NUM
 from src.group_nes_tuner import GroupNESTuner
 from src.nes_tuner import NESTuner
 from src.pbt_tuner import PBTTuner
@@ -278,11 +278,13 @@ def resolve_tuners(tuner_type: str) -> list[TunerType]:
     res: list[TunerType] | None = None
     match tuner_type:
         case "COM":
-            res = [TunerType.NES, TunerType.PBT]
+            res = [TunerType.NES, TunerType.PBT, TunerType.GROUP_NES]
         case "NES":
             res = [TunerType.NES]
         case "PBT":
             res = [TunerType.PBT]
+        case "GROUP":
+            res = [TunerType.GROUP_NES]
         case _:
             error_message = f"Unknown tuner type: {tuner_type}"
             raise ValueError(error_message)
@@ -295,35 +297,19 @@ def main() -> None:
         "--tuner_type",
         "-T",
         type=str,
-        choices=["NES", "PBT", "COM"],
-        default="COM(comparison PBT and NES)",
+        choices=["nes", "pbt", "group", "com"],
+        default="com(comparison PBT and NES)",
         dest="tuner_type",
         help="Select the Tuner type",
     )
-    parser.add_argument(
-        "--test_num",
-        "-N",
-        type=int,
-        default=1,
-        dest="test_num",
-        help="How many times to run the test",
-    )
-    parser.add_argument(
-        "--trial_num",
-        "-R",
-        type=int,
-        default=5,
-        dest="trial_num",
-        help="Number of trails to run for each tuner type",
-    )
     args = parser.parse_args()
 
-    tuners = resolve_tuners(args.tuner_type)
-    for _ in repeat(None, args.test_num):
+    tuners = resolve_tuners(args.tuner_type.upper())
+    for _ in repeat(None, TEST_NUM):
         for tuner_type in tuners:
             hyperparameter_optimize(
                 tuner_type=tuner_type,
-                trial_num=args.trial_num,
+                trial_num=TRIAL_NUM,
             )
 
 

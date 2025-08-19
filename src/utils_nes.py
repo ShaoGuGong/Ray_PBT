@@ -6,7 +6,7 @@ from typing import NamedTuple
 
 import numpy as np
 from numpy import exp, floating
-from numpy.linalg import cholesky, det
+from numpy.linalg import cholesky, det, inv
 from numpy.random import multivariate_normal
 from numpy.typing import NDArray
 from scipy.linalg import expm
@@ -20,8 +20,7 @@ class Fitness:
     hyperparameter: Hyperparameter
 
 
-@dataclass(slots=True)
-class NaturalGradients:
+class NaturalGradients(NamedTuple):
     nabla_sigma: floating
     nabla_delta: NDArray[floating]
     nabla_b: NDArray[floating]
@@ -42,6 +41,45 @@ class Distribution:
     fitnesses: deque[Fitness]
     previous_gradients: NaturalGradients | None
     log_file: Path = field(init=False)
+
+    @staticmethod
+    def compute_kl_divergence(
+        p: "Distribution",
+        q: "Distribution",
+    ) -> float:
+        r"""
+        Compute the KL divergence between two distributions.
+
+        $$
+        \operatorname{KL}(p | q) = \frac{1}{2}\left(\log{\frac{\Sigma_q}
+        {\Sigma_p}} - d + \operatorname{tr}
+        \left(\Sigma_q^{-1}\Sigma_p\right) + \left(\mu_q - \mu_p\right)^T
+        \Sigma_q^{-1} \left(\mu_q - \mu_p\right)\right)
+        $$
+
+        Args:
+            p (Distribution): The first distribution.
+            q (Distribution): The second distribution.
+
+        Returns:
+            flost: The KL divergence between the two distributions.
+        """
+        mean_p, covariance_p = p.get_attribute()
+        mean_q, covariance_q = q.get_attribute()
+
+        log_term = np.log(det(covariance_q) / det(covariance_p))
+        d = mean_p.shape[0]
+        trace_term = np.trace(inv(covariance_q) @ covariance_p)
+        diffence_term = mean_q - mean_p
+
+        res = (
+            log_term
+            - d
+            + trace_term
+            + diffence_term.T @ inv(covariance_q) @ diffence_term
+        )
+
+        return res / 2
 
     @staticmethod
     def fitness_shaping(fitnesses: list[Fitness]) -> list:
@@ -67,6 +105,15 @@ class Distribution:
         utilities_raw = [max(0.0, base - math.log(i + 1)) for i in range(size)]
         denominator = sum(utilities_raw)
         return [u / denominator - 1.0 / size for u in utilities_raw]
+
+    @property
+    def covariance(self) -> NDArray[floating]:
+        return (self.b_matrix.T @ self.b_matrix) * (self.sigma**2)
+
+    def get_attribute(
+        self,
+    ) -> tuple[NDArray[floating], NDArray[floating]]:
+        return (self.mean, self.covariance)
 
     def __post_init__(self) -> None:
         log_dir_path = "~/Documents/workspace/shaogu/Ray_PBT/log/"

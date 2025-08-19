@@ -29,3 +29,5 @@ TRIAL_PROGRESS_OUTPUT_PATH = Path(
         "~/Documents/Ray_PBT/trial_progress.output",
     ),
 ).expanduser()
+TRIAL_NUM = config.get("trial_num", 10)
+TEST_NUM = config.get("test_num", 1)
