@@ -24,9 +24,7 @@ def cpu_scheduling(
     slot_refs: list = [
         worker.get_available_slots.remote() for worker in cpu_workers
     ]
-
-    wait_futures, _ = ray.wait(slot_refs, num_returns=1)
-    available_futures = ray.get(wait_futures)
+    available_futures = ray.get(slot_refs)
 
     available_cpu_workers = [
         worker
@@ -70,9 +68,7 @@ def gpu_scheduling(
     slot_refs: list = [
         worker.get_available_slots.remote() for worker in gpu_workers
     ]
-
-    wait_futures, _ = ray.wait(slot_refs, num_returns=len(slot_refs))
-    available_futures = ray.get(wait_futures)
+    available_futures = ray.get(slot_refs)
 
     available_gpu_workers = [
         (worker, available_slots)
@@ -185,7 +181,8 @@ def gpu_stealing_strategy(
 
     if running_cpu_workers:
         worker, trial_state = min(
-            running_cpu_workers, key=lambda x: x[1].iteration,
+            running_cpu_workers,
+            key=lambda x: x[1].iteration,
         )
         logger.info("對 Trial %d 執行搶奪", trial_state.id)
         ray.wait(

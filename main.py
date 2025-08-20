@@ -220,8 +220,9 @@ def hyperparameter_optimize(tuner_type: TunerType, trial_num: int) -> None:
         case TunerType.NES:
             distribution: Distribution = Distribution.get_random_distribution()
             trial_states = generate_trial_states(
-                trial_num,
-                distribution.get_new_hyper,
+                n=trial_num,
+                random_fn=distribution.get_new_hyper,
+                tuner_type=TunerType.NES,
             )
             tuner = NESTuner.options(  # type: ignore[call-arg]
                 max_concurrency=5,
@@ -234,7 +235,7 @@ def hyperparameter_optimize(tuner_type: TunerType, trial_num: int) -> None:
                 distribution,
             )
         case TunerType.PBT:
-            trial_states = generate_trial_states(trial_num)
+            trial_states = generate_trial_states(n=trial_num)
             tuner = PBTTuner.options(  # type: ignore[call-arg]
                 max_concurrency=5,
                 num_cpus=1,
@@ -246,8 +247,9 @@ def hyperparameter_optimize(tuner_type: TunerType, trial_num: int) -> None:
                 num_distributions=3,
             )
             trial_states = generate_trial_states(
-                trial_num,
-                manager.hyper_init,
+                n=trial_num,
+                random_fn=manager.hyper_init,
+                tuner_type=TunerType.GROUP_NES,
             )
             tuner = GroupNESTuner.options(  # type: ignore[call-arg]
                 max_concurrency=5,
@@ -277,7 +279,7 @@ def hyperparameter_optimize(tuner_type: TunerType, trial_num: int) -> None:
 def resolve_tuners(tuner_type: str) -> list[TunerType]:
     res: list[TunerType] | None = None
     match tuner_type:
-        case "COM":
+        case "COMPARISON":
             res = [TunerType.NES, TunerType.PBT, TunerType.GROUP_NES]
         case "NES":
             res = [TunerType.NES]
@@ -297,8 +299,8 @@ def main() -> None:
         "--tuner_type",
         "-T",
         type=str,
-        choices=["nes", "pbt", "group", "com"],
-        default="com(comparison PBT and NES)",
+        choices=["nes", "pbt", "group", "comparison"],
+        default="comparison",
         dest="tuner_type",
         help="Select the Tuner type",
     )

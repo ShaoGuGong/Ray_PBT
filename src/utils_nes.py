@@ -1,6 +1,7 @@
 import math
 from collections import deque
 from dataclasses import dataclass, field
+from itertools import repeat
 from pathlib import Path
 from typing import NamedTuple
 
@@ -11,7 +12,7 @@ from numpy.random import multivariate_normal
 from numpy.typing import NDArray
 from scipy.linalg import expm
 
-from utils import Hyperparameter, ModelType
+from .utils import Hyperparameter, ModelType
 
 
 @dataclass(slots=True)
@@ -294,10 +295,12 @@ class DistributionManager:
         self.distributions: list[Group] = []
         self.counter = 0
 
-        for i in range(num_distributions):
-            self.distributions[i] = Group(
-                distribution=Distribution.get_random_distribution(),
-                trials=set(),
+        for _ in repeat(None, num_distributions):
+            self.distributions.append(
+                Group(
+                    distribution=Distribution.get_random_distribution(),
+                    trials=set(),
+                ),
             )
 
     def get_new_hyper(self, trial_id: int) -> Hyperparameter:

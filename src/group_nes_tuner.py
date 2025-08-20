@@ -33,7 +33,7 @@ class GroupNESTuner(Tuner):
         log_dir.mkdir(exist_ok=True)
         log_file = log_dir / "accuracy.log"
         with log_file.open("a") as f:
-            f.write(f"Use NES Accuracy: {history_best[0]:.6f}\n")
+            f.write(f"Use GroupNES Accuracy: {history_best[0]:.6f}\n")
 
     def should_mutate_trial(  # type: ignore[override]
         self,
