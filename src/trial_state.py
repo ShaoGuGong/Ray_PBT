@@ -1,6 +1,7 @@
 import copy
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import TypedDict
 
 import ray
 import torch
@@ -20,12 +21,55 @@ from .utils import (
     WorkerType,
 )
 
+ALLOWED_PARTIAL_KEYS = {
+    "accuracy",
+    "checkpoint",
+    "chunk_size",
+    "device_iteration_count",
+    "generation",
+    "hyperparameter",
+    "last_checkpoint_location",
+    "status",
+    "worker_id",
+    "worker_type",
+}
+
+
+class PartialTrialState(TypedDict, total=False):
+    """
+    用於表示 trial 狀態的部分資訊 (Partial State), 允許缺少部分欄位。
+    這個結構主要用於在更新或檢查 trial 狀態時, 避免需要完整定義所有欄位。
+
+    Attributes:
+        accuracy (float): 該 trial 的當前準確率 (accuracy)。
+        checkpoint (Checkpoint): 儲存當前模型或訓練進度的 Checkpoint。
+        chunk_size (float): 在資料分批 (batch/chunk) 過程中的大小設定。
+        generation (int): 該 trial 所屬的世代 (generation), 用於 PBT 演化流程。
+        hyperparameter (Hyperparameter): 該 trial 使用的超參數 (hyperparameters)。
+        last_checkpoint_location (CheckpointLocation): 最近一次儲存的 Checkpoint 位置資訊。
+        status (TrialStatus): 該 trial 當前的執行狀態 (running, completed, failed 等)。
+        worker_id (int): 負責執行此 trial 的 worker 識別碼 (ID)。
+        worker_type (WorkerType): 該 worker 的類型 (CPU 或 GPU)。
+    """
+
+    accuracy: float
+    checkpoint: Checkpoint
+    chunk_size: float
+    device_iteration_count: dict[WorkerType, int]
+    generation: int
+    hyperparameter: Hyperparameter
+    last_checkpoint_location: CheckpointLocation
+    status: TrialStatus
+    worker_id: int
+    worker_type: WorkerType | None
+
 
 @dataclass(slots=True)
 class TrialState:
     id: int
     hyperparameter: Hyperparameter
     _raw_model_init_fn: ModelInitFunction
+
     max_generation: int = MAX_GENERATION
     status: TrialStatus = TrialStatus.PENDING
     worker_id: int = -1
@@ -41,7 +85,7 @@ class TrialState:
     )
     accuracy: float = 0.0
     stop_accuracy: float = STOP_ACCURACY
-    chunk_size: int = 1
+    target_generation: float = 1
     model_init_fn: Callable[
         [device],
         tuple[nn.Module, optim.Optimizer],
@@ -73,6 +117,14 @@ class TrialState:
                 if isinstance(v, torch.Tensor):
                     state[k] = v.cpu()
         self.checkpoint.optimizer_state_dict = optimizer_state_dict
+
+    def update_partial(self, partial: PartialTrialState) -> None:
+        for key, value in partial.items():
+            if key in ALLOWED_PARTIAL_KEYS:
+                setattr(self, key, value)
+            else:
+                msg = f"無法更新 TrialState 屬性 '{key}'"
+                raise AttributeError(msg)
 
     def get_remote_checkpoint(self) -> Checkpoint:
         if self.last_checkpoint_location.is_empty():
@@ -106,26 +158,8 @@ class TrialState:
         new_trial.checkpoint = Checkpoint.empty()
         return new_trial
 
-    def set_chunk_size(self, chunk_size: int) -> None:
-        if chunk_size < 1:
+    def set_target_generation(self, target_generation: int) -> None:
+        if target_generation < 1:
             msg = "Chunk size must be at least 1"
             raise ValueError(msg)
-        self.chunk_size = chunk_size
-
-    def set_terminated(self) -> None:
-        self.status = TrialStatus.TERMINATED
-
-    def set_pause(self) -> None:
-        self.status = TrialStatus.PAUSE
-
-    def set_running(self) -> None:
-        self.status = TrialStatus.RUNNING
-
-    def set_pending(self) -> None:
-        self.status = TrialStatus.PENDING
-
-    def set_need_mutation(self) -> None:
-        self.status = TrialStatus.NEED_MUTATION
-
-    def set_waiting(self) -> None:
-        self.status = TrialStatus.WAITING
+        self.target_generation = target_generation

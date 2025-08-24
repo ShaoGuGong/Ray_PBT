@@ -7,6 +7,8 @@ from pathlib import Path
 import ray
 from ray.actor import ActorHandle
 
+from src.config import CPU_TRIALS_LIMIT, GPU_TRIALS_LIMIT
+
 from .trial_state import TrialState
 from .utils import (
     DataloaderFactory,
@@ -118,6 +120,24 @@ class WorkerManager:
             if worker_entry.available_slots > 0
         ]
 
+    def assign_trials_to_worker(
+        self,
+        worker_id: int,
+        trial_states: list[TrialState],
+    ) -> None:
+        entry = self.workers.get(worker_id, None)
+        if entry is None:
+            msg = f"Worker {worker_id} 不存在."
+            raise ValueError(msg)
+
+        for trial in trial_states:
+            if entry.available_slots <= 0:
+                msg = f"Worker {worker_id} 沒有可用的 slot. {entry.active_trials}"
+                raise ValueError(msg)
+
+            entry.active_trials.append(trial.id)
+        entry.ref.init_trial_queue.remote(trial_states)
+
     def assign_trial_to_worker(
         self,
         worker_id: int,
@@ -129,6 +149,11 @@ class WorkerManager:
             raise ValueError(msg)
 
         entry.active_trials.append(trial.id)
+        self.logger.info(
+            "Active trials on Worker %d: %s",
+            worker_id,
+            entry.active_trials,
+        )
         self.assign_count["assign"] += 1
 
         if trial.last_checkpoint_location.worker_id == worker_id:
@@ -218,7 +243,7 @@ def generate_all_worker_states() -> list[WorkerState]:
                         num_cpus=1,
                         num_gpus=gpus,
                         node_name=f"node:{node_address}",
-                        max_trials=3,
+                        max_trials=GPU_TRIALS_LIMIT,
                         worker_type=WorkerType.GPU,
                     ),
                 )
@@ -233,7 +258,7 @@ def generate_all_worker_states() -> list[WorkerState]:
                         num_cpus=cpus,
                         num_gpus=0,
                         node_name=f"node:{node_address}",
-                        max_trials=1,
+                        max_trials=CPU_TRIALS_LIMIT,
                         worker_type=WorkerType.CPU,
                     ),
                 )

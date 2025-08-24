@@ -31,8 +31,6 @@ class TrialStatus(Enum):
     RUNNING = auto()
     PENDING = auto()
     TERMINATED = auto()
-    PAUSE = auto()
-    NEED_MUTATION = auto()
     FAILED = auto()
     WAITING = auto()
 
