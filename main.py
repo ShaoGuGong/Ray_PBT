@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from itertools import islice
 from pathlib import Path
 
@@ -9,10 +9,12 @@ from torch import nn, optim
 from torch.utils.data import DataLoader
 from torchvision import models, transforms
 
-from src.config import DATASET_PATH, STOP_ITERATION
+from src.config import DATASET_PATH, MAX_GENERATION
 from src.trial_state import TrialState
 from src.tuner import Tuner
 from src.utils import Checkpoint, Hyperparameter, get_head_node_address, unzip_file
+
+DEFAULT_DEVICE = torch.device("cpu")
 
 
 def cifar10_data_loader_factory(
@@ -109,8 +111,17 @@ def resnet18_init_fn(
     model = models.resnet18()
     model.fc = nn.Linear(model.fc.in_features, 10)
 
-    if checkpoint:
-        model.load_state_dict(checkpoint.model_state_dict)
+    if checkpoint.is_empty():
+        model.to(device)
+        optimizer = optim.SGD(
+            model.parameters(),
+            lr=hyperparameter.lr,
+            momentum=hyperparameter.momentum,
+        )
+
+        return model, optimizer
+
+    model.load_state_dict(checkpoint.model_state_dict)
     model = model.to(device)
 
     optimizer = optim.SGD(
@@ -118,9 +129,7 @@ def resnet18_init_fn(
         lr=hyperparameter.lr,
         momentum=hyperparameter.momentum,
     )
-
-    if checkpoint:
-        optimizer.load_state_dict(checkpoint.optimizer_state_dict)
+    optimizer.load_state_dict(checkpoint.optimizer_state_dict)
 
     for param_group in optimizer.param_groups:
         param_group["lr"] = hyperparameter.lr
@@ -134,8 +143,7 @@ def generate_trial_states(n: int = 1) -> list[TrialState]:
         TrialState(
             i,
             Hyperparameter.random(),
-            model_init_fn=resnet18_init_fn,
-            stop_iteration=STOP_ITERATION,
+            resnet18_init_fn,
         )
         for i in range(n)
     ]
@@ -146,7 +154,7 @@ def train_step(
     optimizer: optim.Optimizer,
     train_loader: DataLoader,
     batch_size: int,
-    device: torch.device = torch.device("cpu"),
+    device: torch.device = DEFAULT_DEVICE,
 ) -> None:
     model.train()
     criterion = nn.CrossEntropyLoss().to(device)
@@ -177,7 +185,7 @@ if __name__ == "__main__":
     )
     trial_states = generate_trial_states(50)
     tuner = Tuner.options(  # type: ignore[call-arg]
-        max_concurrency=13,
+        max_concurrency=5,
         num_cpus=1,
         resources={f"node:{get_head_node_address()}": 0.01},
     ).remote(trial_states, train_step, cifar10_data_loader_factory)
@@ -185,7 +193,9 @@ if __name__ == "__main__":
 
     zip_logs_bytes: bytes = ray.get(tuner.get_zipped_log.remote())  # type: ignore[call-arg]
 
-    zip_output_dir = f"./logs/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}/"
+    time_stamp = (datetime.now(UTC) + timedelta(hours=8)).strftime("%Y-%m-%d_%H-%M-%S")
+    zip_output_dir = f"./logs/{time_stamp}/"
+
     Path(zip_output_dir).mkdir(parents=True, exist_ok=True)
     zip_output_path = Path(zip_output_dir) / "logs.zip"
     with Path(zip_output_path).open("wb") as f:

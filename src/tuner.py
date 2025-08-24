@@ -1,17 +1,26 @@
 import logging
 import os
-import random
 import time
 import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import ray
 
+from .trial_manager import TrialManager
 from .trial_scheduler import TrialScheduler
-from .trial_state import TrialManager, TrialState
-from .utils import DataloaderFactory, TrainStepFunction
-from .worker import generate_all_workers
+from .trial_state import PartialTrialState, TrialState
+from .utils import (
+    DataloaderFactory,
+    TrainStepFunction,
+    WorkerType,
+    get_head_node_address,
+)
+from .worker_manager import WorkerManager
+
+if TYPE_CHECKING:
+    from ray.actor import ActorHandle
 
 
 def get_tuner_logger() -> logging.Logger:
@@ -52,23 +61,25 @@ class Tuner:
         train_step: TrainStepFunction,
         dataloader_factory: DataloaderFactory,
     ) -> None:
-        self.trial_states = trial_states
         self.logger = get_tuner_logger()
-
         self.logger.info("總共 %d 個 Trial", len(trial_states))
-        self.logger.info("\n".join([str(t.hyperparameter) for t in trial_states]))
 
-        self.workers = generate_all_workers(
+        self.trial_manager: ActorHandle = TrialManager.options(
+            max_concurrency=10,
+            num_cpus=1,
+            resources={f"node:{get_head_node_address()}": 0.01},
+        ).remote(trial_states)  # type: ignore[reportGeneralTypeIssues]
+
+        self.worker_manager = WorkerManager(
             ray.get_runtime_context().current_actor,
+            self.trial_manager,
             train_step=train_step,
             dataloader_factory=dataloader_factory,
         )
 
-        self.trial_manager = TrialManager(trial_states)
         self.scheduler: TrialScheduler = TrialScheduler(
-            self.workers,
+            self.worker_manager,
             self.trial_manager,
-            self.mutation,
         )
 
     def run(self) -> None:
@@ -79,42 +90,124 @@ class Tuner:
         end = time.time()
         self.logger.info("訓練總時長: %.2f 秒", end - start)
         self.scheduler.get_workers_logs()
+        self.logger.info("Assign: %d", self.worker_manager.assign_count["assign"])
+        self.logger.info("Locality: %d", self.worker_manager.assign_count["locality"])
 
-    def update_trial(self, trial_state: TrialState) -> None:
-        self.trial_manager.update_trial(trial_state)
-
-    def get_mutation_baseline(self) -> float:
-        return self.trial_manager.get_cached_mutation_baseline()
-
-    def get_chunk_size(self, iteration: int) -> int:
-        return self.trial_manager.get_chunk_size(iteration)
-
-    def mutation(self, trial_state: TrialState) -> TrialState:
-        self.logger.info(
-            "Trial %d: 執行mutation, 原始超參數: %s",
-            trial_state.id,
-            trial_state.hyperparameter,
-        )
-
-        upper_quantile = self.trial_manager.get_upper_quantile_trials()
-
-        chose_trial = random.choice(upper_quantile)
-        hyperparameter = chose_trial.hyperparameter.explore()
-
-        trial_state.hyperparameter = hyperparameter
-        trial_state.checkpoint = chose_trial.checkpoint
+    def on_trial_complete(
+        self,
+        worker_id: int,
+        trial_id: int,
+        worker_type: WorkerType,
+        partial: PartialTrialState,
+    ) -> None:
+        if "accuracy" not in partial:
+            self.logger.warning(
+                "Worker %d 回傳的 Trial %d 沒有 accuracy",
+                worker_id,
+                trial_id,
+            )
+            msg = "Worker %d 回傳的 Trial %d Partial沒有 accuracy"
+            raise ValueError(msg)
 
         self.logger.info(
-            "Trial-%d Iter-%d, 結束mutation, 新超參數: %s",
-            trial_state.id,
-            trial_state.iteration,
-            trial_state.hyperparameter,
+            "✅ Worker %d Trial %d 完成, Accuracy: %.2f",
+            worker_id,
+            trial_id,
+            partial["accuracy"],
         )
 
-        return trial_state
+        new_partial = partial | {"worker_id": -1, "worker_type": None}
+        ray.get(
+            self.trial_manager.transition_to_completed.remote(trial_id, new_partial),  # type: ignore[reportGeneralTypeIssues]
+        )
+        self.worker_manager.release_slots(worker_id, trial_id)
 
-    def submit_trial(self, trial_state: TrialState) -> None:
-        self.scheduler.submit_trial(trial_state)
+        if ray.get(self.trial_manager.is_finish.remote()):  # type: ignore[reportGeneralTypeIssues]
+            self.scheduler.finish()
+            return
+
+        self.scheduler.assign_trial_to_worker(
+            worker_id,
+            worker_type,
+        )
+
+    def on_trial_step_complete(
+        self,
+        worker_id: int,
+        trial_id: int,
+        worker_type: WorkerType,
+        partial: PartialTrialState,
+    ) -> None:
+        if "accuracy" not in partial or "generation" not in partial:
+            self.logger.warning(
+                "Worker %d 回傳的 Trial %d 沒有 accuracy 或 generation",
+                worker_id,
+                trial_id,
+            )
+            error_msg = "Worker %d 回傳的 Trial %d Partial沒有 accuracy 或 generation"
+            raise ValueError(error_msg)
+
+        self.logger.info(
+            "🔃 Worker %d 回傳未完成 Trial %d, Iteration: %d, Accuracy: %.2f",
+            worker_id,
+            trial_id,
+            partial["generation"],
+            partial["accuracy"],
+        )
+
+        partial["worker_id"] = -1
+        partial["worker_type"] = None
+        ray.get(
+            self.trial_manager.transition_to_pending.remote(  # type: ignore[reportGeneralTypeIssues]
+                trial_id,
+                partial,
+            ),
+        )
+
+        self.worker_manager.release_slots(worker_id, trial_id)
+
+        self.scheduler.assign_trial_to_worker(
+            worker_id,
+            worker_type,
+        )
+
+    def on_trial_need_mutation(
+        self,
+        worker_id: int,
+        trial_id: int,
+        worker_type: WorkerType,
+        partial: PartialTrialState,
+    ) -> None:
+        self.logger.info(
+            "🔃 Worker %d 回傳 Trial %d 執行 mutation",
+            worker_id,
+            trial_id,
+        )
+
+        self.logger.info("Trial %d: 執行mutation", trial_id)
+        mutation_partial = ray.get(self.trial_manager.mutation.remote())  # type: ignore[reportGeneralTypeIssues]
+
+        self.logger.info(
+            "Trial %d 結束mutation, 新超參數: %s",
+            trial_id,
+            mutation_partial["hyperparameter"],
+        )
+
+        partial["worker_id"] = -1
+        partial["worker_type"] = None
+        ray.get(
+            self.trial_manager.transition_to_pending.remote(  # type: ignore[reportGeneralTypeIssues]
+                trial_id,
+                partial | mutation_partial,
+            ),
+        )
+
+        self.worker_manager.release_slots(worker_id, trial_id)
+
+        self.scheduler.assign_trial_to_worker(
+            worker_id,
+            worker_type,
+        )
 
     def get_zipped_log(self) -> bytes:
         log_dir = None
@@ -123,9 +216,21 @@ class Tuner:
             if isinstance(handler, logging.FileHandler):
                 log_dir = Path(handler.baseFilename).parent  # 取得資料夾路徑
                 break
+
         if log_dir is None:
             msg = "log_dir not found."
             raise FileNotFoundError(msg)
+
+        trial_manager_log_content = ray.get(
+            self.trial_manager.get_log_file.remote(),  # type: ignore[reportGeneralTypeIssues]
+        )
+        with (log_dir / "trial_manager.log").open("w") as f:
+            f.write(trial_manager_log_content)
+
+        worker_manager_log_content = self.worker_manager.get_log_file()
+
+        with (log_dir / "worker_manager.log").open("w") as f:
+            f.write(worker_manager_log_content)
 
         zip_path = "./logs.zip"
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:

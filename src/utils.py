@@ -1,12 +1,16 @@
+import logging
 import random
+import time
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum, auto
-from functools import reduce
-from typing import Any, Protocol, TypeVar
+from functools import reduce, wraps
+from typing import ParamSpec, Protocol, TypeVar
 
 import ray
+from ray.actor import ActorHandle
 from torch import device, nn, optim
 from torch.utils.data import DataLoader
 
@@ -26,11 +30,9 @@ class ModelType(Enum):
 class TrialStatus(Enum):
     RUNNING = auto()
     PENDING = auto()
-    TERMINATE = auto()
-    PAUSE = auto()
-    INTERRUPTED = auto()
-    NEED_MUTATION = auto()
+    TERMINATED = auto()
     FAILED = auto()
+    WAITING = auto()
 
     def __str__(self) -> str:
         return self.name
@@ -58,9 +60,21 @@ class WorkerState:
     num_cpus: int
     num_gpus: int
     node_name: str
-    calculate_ability: float = 0.0
     max_trials: int = 1
     worker_type: WorkerType = WorkerType.CPU
+
+    total_train_time: float = 0.0
+    train_step_count: int = 0
+
+    @property
+    def avg_train_time(self) -> float:
+        if self.train_step_count == 0:
+            return 0.0
+        return self.total_train_time / self.train_step_count
+
+    def record_train_time(self, duration: float) -> None:
+        self.total_train_time += duration
+        self.train_step_count += 1
 
 
 @dataclass
@@ -99,16 +113,38 @@ class Checkpoint:
     model_state_dict: dict
     optimizer_state_dict: dict
 
+    @classmethod
+    def empty(cls) -> "Checkpoint":
+        return cls(model_state_dict={}, optimizer_state_dict={})
+
+    def is_empty(self) -> bool:
+        return not self.model_state_dict and not self.optimizer_state_dict
+
+
+@dataclass
+class CheckpointLocation:
+    worker_id: int | None
+    worker_reference: ActorHandle | None
+
+    @classmethod
+    def empty(cls) -> "CheckpointLocation":
+        return cls(worker_id=None, worker_reference=None)
+
+    def is_empty(self) -> bool:
+        return self.worker_id is None and self.worker_reference is None
+
 
 # ╭──────────────────────────────────────────────────────────╮
 # │                       Type Define                        │
 # ╰──────────────────────────────────────────────────────────╯
 
-Accuracy = float
+
+P = ParamSpec("P")
+R = TypeVar("R")
 
 
-class TrainStepFunction(Protocol):
-    def __call__(self, *args: Any, **kwargs: Any) -> None: ...
+class TrainStepFunction(Protocol[P]):
+    def __call__(self, *args: P.args, **kwargs: P.kwargs) -> None: ...
 
 
 class DataloaderFactory(Protocol):
@@ -186,3 +222,63 @@ def colored_progress_bar(data: list[int], bar_width: int) -> str:
 def unzip_file(zip_path: str, extract_to: str) -> None:
     with zipfile.ZipFile(zip_path, "r") as zf:
         zf.extractall(extract_to)
+
+
+@contextmanager
+def timing_block(
+    label: str,
+    logger: Callable[[str], None] | None = None,
+) -> Iterator[None]:
+    start = time.perf_counter()
+    yield
+    end = time.perf_counter()
+    msg = f"{label} 花費 {end - start:.6f} 秒"
+    if logger:
+        logger(msg)
+    else:
+        print(msg)  # noqa: T201
+
+
+def get_tensor_dict_size(state_dict: dict) -> int:
+    total = 0
+    for v in state_dict.values():
+        if isinstance(v, dict):
+            total += get_tensor_dict_size(v)
+        elif isinstance(v, list):
+            for item in v:
+                if isinstance(item, dict):
+                    total += get_tensor_dict_size(item)
+        elif hasattr(v, "numel") and hasattr(v, "element_size"):
+            total += v.numel() * v.element_size()
+    return total
+
+
+# ╭──────────────────────────────────────────────────────────╮
+# │                        Decorators                        │
+# ╰──────────────────────────────────────────────────────────╯
+
+
+def timer() -> Callable[[Callable[P, R]], Callable[P, R]]:
+    def decorator(func: Callable[P, R]) -> Callable[P, R]:
+        @wraps(func)
+        def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+            start = time.perf_counter()
+            result = func(*args, **kwargs)
+            end = time.perf_counter()
+            message = f"Function '{func.__name__}' 花費 {end - start:.6f} 秒"
+
+            if args and hasattr(args[0], "logger"):
+                logger = getattr(args[0], "logger", None)
+
+                if isinstance(logger, logging.Logger | logging.LoggerAdapter):
+                    logger.info(message)
+                else:
+                    print(message)  # noqa: T201
+
+            else:
+                print(message)  # noqa: T201
+            return result
+
+        return wrapper
+
+    return decorator

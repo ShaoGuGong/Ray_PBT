@@ -1,76 +1,114 @@
-import heapq
-import math
-import time
-from pathlib import Path
-from typing import TYPE_CHECKING
+import copy
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import TypedDict
 
+import ray
 import torch
 from torch import device, nn, optim
 
 from .config import (
-    MUTATION_ITERATION,
+    MAX_GENERATION,
     STOP_ACCURACY,
-    STOP_ITERATION,
-    TRIAL_PROGRESS_OUTPUT_PATH,
 )
 from .utils import (
     Checkpoint,
+    CheckpointLocation,
     Hyperparameter,
     ModelInitFunction,
     TrialStatus,
+    WorkerState,
     WorkerType,
 )
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
+ALLOWED_PARTIAL_KEYS = {
+    "accuracy",
+    "checkpoint",
+    "chunk_size",
+    "device_iteration_count",
+    "generation",
+    "hyperparameter",
+    "last_checkpoint_location",
+    "status",
+    "worker_id",
+    "worker_type",
+}
 
 
+class PartialTrialState(TypedDict, total=False):
+    """
+    用於表示 trial 狀態的部分資訊 (Partial State), 允許缺少部分欄位。
+    這個結構主要用於在更新或檢查 trial 狀態時, 避免需要完整定義所有欄位。
+
+    Attributes:
+        accuracy (float): 該 trial 的當前準確率 (accuracy)。
+        checkpoint (Checkpoint): 儲存當前模型或訓練進度的 Checkpoint。
+        chunk_size (float): 在資料分批 (batch/chunk) 過程中的大小設定。
+        generation (int): 該 trial 所屬的世代 (generation), 用於 PBT 演化流程。
+        hyperparameter (Hyperparameter): 該 trial 使用的超參數 (hyperparameters)。
+        last_checkpoint_location (CheckpointLocation): 最近一次儲存的 Checkpoint 位置資訊。
+        status (TrialStatus): 該 trial 當前的執行狀態 (running, completed, failed 等)。
+        worker_id (int): 負責執行此 trial 的 worker 識別碼 (ID)。
+        worker_type (WorkerType): 該 worker 的類型 (CPU 或 GPU)。
+    """
+
+    accuracy: float
+    checkpoint: Checkpoint
+    chunk_size: float
+    device_iteration_count: dict[WorkerType, int]
+    generation: int
+    hyperparameter: Hyperparameter
+    last_checkpoint_location: CheckpointLocation
+    status: TrialStatus
+    worker_id: int
+    worker_type: WorkerType | None
+
+
+@dataclass(slots=True)
 class TrialState:
-    def __init__(
-        self,
-        trial_id: int,
-        hyperparameter: Hyperparameter,
-        stop_iteration: int = STOP_ITERATION,
-        *,
-        model_init_fn: ModelInitFunction | None = None,
-        without_checkpoint: bool = False,
-    ) -> None:
-        self.id: int = trial_id
-        self.hyperparameter: Hyperparameter = hyperparameter
-        self.stop_iteration: int = stop_iteration
-        self.status: TrialStatus = TrialStatus.PENDING
-        self.worker_id: int = -1
-        self.worker_type: WorkerType | None = None
-        self.run_time: float = 0
-        self.iteration: int = 0
-        self.device_iteration_count = {WorkerType.CPU: 0, WorkerType.GPU: 0}
-        self.checkpoint: Checkpoint | None = None
-        self.accuracy: float = 0.0
-        self.stop_accuracy: int = STOP_ACCURACY
-        self.chunk_size: int = 1
+    id: int
+    hyperparameter: Hyperparameter
+    _raw_model_init_fn: ModelInitFunction
 
-        if not without_checkpoint:
-            if model_init_fn is None:
-                msg = (
-                    f"TrialState(id={self.id}) requires a model_factory to create model"
-                    "and optimizer unless `without_checkpoint=True`"
-                )
-                raise ValueError(msg)
+    max_generation: int = MAX_GENERATION
+    status: TrialStatus = TrialStatus.PENDING
+    worker_id: int = -1
+    worker_type: WorkerType | None = None
+    run_time: float = 0
+    generation: int = 0
+    device_iteration_count: dict[WorkerType, int] = field(
+        default_factory=lambda: {WorkerType.CPU: 0, WorkerType.GPU: 0},
+    )
+    checkpoint: Checkpoint = field(default_factory=Checkpoint.empty)
+    last_checkpoint_location: CheckpointLocation = field(
+        default_factory=CheckpointLocation.empty,
+    )
+    accuracy: float = 0.0
+    stop_accuracy: float = STOP_ACCURACY
+    target_generation: float = 1
+    model_init_fn: Callable[
+        [device],
+        tuple[nn.Module, optim.Optimizer],
+    ] = field(init=False, repr=False, compare=False)
 
-            self.model_init_fn: Callable[
-                [device],
-                tuple[nn.Module, optim.Optimizer],
-            ] = (
-                lambda d: model_init_fn(self.hyperparameter, self.checkpoint, d)  # type: ignore[return-value]
-            )
-            model, optimizer = self.model_init_fn(device("cpu"))
-            self.checkpoint = Checkpoint({}, {})
-            self.update_checkpoint(model, optimizer)
+    def __post_init__(self) -> None:
+        self.model_init_fn = (
+            lambda device: self._raw_model_init_fn(
+                self.hyperparameter,
+                self.checkpoint,
+                device,
+            )  # type: ignore[return-value]
+        )
+
+    def update_worker_state(self, worker_state: WorkerState) -> None:
+        self.worker_type = worker_state.worker_type
+        self.worker_id = worker_state.id
+        self.last_checkpoint_location = CheckpointLocation(
+            worker_state.id,
+            ray.get_runtime_context().current_actor,
+        )
 
     def update_checkpoint(self, model: nn.Module, optimizer: optim.Optimizer) -> None:
-        if self.checkpoint is None:
-            self.checkpoint = Checkpoint({}, {})
-
         self.checkpoint.model_state_dict = model.cpu().state_dict()
         optimizer_state_dict = optimizer.state_dict()
 
@@ -80,223 +118,48 @@ class TrialState:
                     state[k] = v.cpu()
         self.checkpoint.optimizer_state_dict = optimizer_state_dict
 
-    def without_checkpoint(self) -> "TrialState":
-        new_trial = TrialState(
-            self.id,
-            self.hyperparameter,
-            self.stop_iteration,
-            model_init_fn=None,
-            without_checkpoint=True,
+    def update_partial(self, partial: PartialTrialState) -> None:
+        for key, value in partial.items():
+            if key in ALLOWED_PARTIAL_KEYS:
+                setattr(self, key, value)
+            else:
+                msg = f"無法更新 TrialState 屬性 '{key}'"
+                raise AttributeError(msg)
+
+    def get_remote_checkpoint(self) -> Checkpoint:
+        if self.last_checkpoint_location.is_empty():
+            return Checkpoint.empty()
+
+        return ray.get(
+            self.last_checkpoint_location.worker_reference.get_checkpoint.remote(  # type:ignore[reportGeneralTypeIssues]
+                self.id,
+            ),
         )
-        new_trial.accuracy = self.accuracy
-        new_trial.status = self.status
-        new_trial.worker_id = self.worker_id
-        new_trial.worker_type = self.worker_type
-        new_trial.run_time = self.run_time
-        new_trial.iteration = self.iteration
+
+    def pop_remote_checkpoint(self) -> None:
+        if self.last_checkpoint_location.is_empty():
+            return
+        ray.get(
+            self.last_checkpoint_location.worker_reference.pop_checkpoint.remote(  # type:ignore[reportGeneralTypeIssues]
+                self.id,
+            ),
+        )
+
+    def remove_remote_checkpoint(self) -> None:
+        if self.last_checkpoint_location.is_empty():
+            return
+        self.last_checkpoint_location.worker_reference.remove_checkpoint.remote(  # type:ignore[reportGeneralTypeIssues]
+            self.id,
+        )
+
+    @property
+    def snapshot(self) -> "TrialState":
+        new_trial = copy.copy(self)
+        new_trial.checkpoint = Checkpoint.empty()
         return new_trial
 
-    def set_chunk_size(self, chunk_size: int) -> None:
-        if chunk_size < 1:
+    def set_target_generation(self, target_generation: int) -> None:
+        if target_generation < 1:
             msg = "Chunk size must be at least 1"
             raise ValueError(msg)
-        self.chunk_size = chunk_size
-
-    def set_terminated(self) -> None:
-        self.status = TrialStatus.TERMINATE
-
-    def set_pause(self) -> None:
-        self.status = TrialStatus.PAUSE
-
-    def set_interrupted(self) -> None:
-        self.status = TrialStatus.INTERRUPTED
-
-    def set_running(self) -> None:
-        self.status = TrialStatus.RUNNING
-
-    def set_pending(self) -> None:
-        self.status = TrialStatus.PENDING
-
-    def set_need_mutation(self) -> None:
-        self.status = TrialStatus.NEED_MUTATION
-
-
-class TrialManager:
-    def __init__(self, trial_states: list[TrialState]) -> None:
-        self.all_trials = {trial.id: trial for trial in trial_states}
-        self.pending = {trial.id for trial in trial_states}
-        self.running = set()
-        self.completed = set()
-        self.history_best: TrialState | None = None
-
-        self._latest_update_mutation_baseline_ts: float = 0.0
-        self._mutation_baseline: float = 0.0
-
-    def add_trial(self, trial_state: TrialState) -> None:
-        self.all_trials[trial_state.id] = trial_state
-
-    def run_trial(self, trial_id: int) -> None:
-        trial = self.all_trials.get(trial_id, None)
-        if trial is None:
-            msg = f"Trial id {trial_id} not found"
-            raise ValueError(msg)
-
-        self.pending.discard(trial_id)
-        self.running.add(trial_id)
-
-    def pend_trial(self, trial_id: int) -> None:
-        trial = self.all_trials.get(trial_id, None)
-        if trial is None:
-            msg = f"Trial id {trial_id} not found"
-            raise ValueError(msg)
-
-        self.running.discard(trial_id)
-        self.pending.add(trial_id)
-
-    def complete_trial(self, trial_id: int) -> None:
-        trial = self.all_trials.get(trial_id, None)
-        if trial is None:
-            msg = f"Trial id {trial_id} not found"
-            raise ValueError(msg)
-
-        self.running.discard(trial_id)
-        self.completed.add(trial_id)
-
-    def get_least_iterated_pending_trial(self) -> TrialState | None:
-        if not self.pending:
-            return None
-
-        return min(
-            (self.all_trials[tid] for tid in self.pending),
-            key=lambda t: t.iteration,
-            default=None,
-        )
-
-    def get_most_iterated_pending_trial(self) -> TrialState | None:
-        if not self.pending:
-            return None
-
-        return max(
-            (self.all_trials[tid] for tid in self.pending),
-            key=lambda t: t.iteration,
-            default=None,
-        )
-
-    def get_chunk_size(self, iteration: int) -> int:
-        iterations = sorted(
-            [trial.iteration for trial in self.all_trials.values()],
-            reverse=True,
-        )
-        length = (len(iterations) // 4) + 1
-        chunk_size = sum(iterations[:length]) // length - iteration
-        chunk_size = (chunk_size + MUTATION_ITERATION) // MUTATION_ITERATION
-        return max(chunk_size, 1)
-
-    def get_history_best_result(self) -> TrialState | None:
-        return self.history_best
-
-    def get_kth_largest_iteration_trial(self, k: int) -> TrialState | None:
-        result = heapq.nlargest(
-            k,
-            [trial for trial in self.all_trials.values() if trial.id in self.pending],
-            key=lambda t: t.iteration,
-        )
-
-        if not result:
-            return None
-        return result[-1]
-
-    def get_mutation_baseline(
-        self,
-        ratio: float = 0.25,
-    ) -> float:
-        accuracy = [
-            trial.accuracy for trial in self.all_trials.values() if trial.accuracy > 0
-        ]
-        quantile_size = math.ceil(len(self.all_trials) * ratio)
-
-        result = heapq.nsmallest(
-            quantile_size,
-            accuracy,
-        )
-
-        if len(result) < quantile_size:
-            return 0.0
-
-        return result[-1]
-
-    def get_cached_mutation_baseline(self) -> float:
-        return self._mutation_baseline
-
-    def get_uncompleted_trial_num(self) -> int:
-        return len(self.all_trials) - len(self.completed)
-
-    def get_upper_quantile_trials(self, ratio: float = 0.25) -> list[TrialState]:
-        trials = [trial for trial in self.all_trials.values() if trial.accuracy > 0]
-        quantile_size = math.ceil(len(self.all_trials) * ratio)
-        return heapq.nlargest(
-            quantile_size,
-            trials,
-            key=lambda t: t.accuracy,
-        )
-
-    def maybe_update_mutation_baseline(self) -> None:
-        now = time.time()
-        iterval_time = 5
-        if now - self._latest_update_mutation_baseline_ts > iterval_time:
-            self._latest_update_mutation_baseline_ts = now
-            self._mutation_baseline = self.get_mutation_baseline()
-
-    def update_trial(self, trial_state: TrialState) -> None:
-        if trial_state.id not in self.all_trials:
-            msg = f"Trial id {trial_state.id} not found"
-            raise ValueError(msg)
-
-        self.all_trials[trial_state.id] = trial_state
-        if trial_state.accuracy > 0 and (
-            self.history_best is None
-            or trial_state.accuracy > self.history_best.accuracy
-        ):
-            self.history_best = trial_state
-
-        self.display_trial_result()
-
-    def is_finish(self) -> bool:
-        return len(self.completed) >= len(self.all_trials)
-
-    def display_trial_result(
-        self,
-        output_path: Path = TRIAL_PROGRESS_OUTPUT_PATH,
-    ) -> None:
-        try:
-            with Path(output_path).open("w") as f:
-                f.write(
-                    f"┏{'':━^4}┳{'':━^11}┳{'':━^11}┳{'':━^37}┳{'':━^7}┳{'':━^7}┓\n"
-                    f"┃{'':^4}┃{'':^11}┃{'Worker':^11}┃{'Hyparameter':^37}┃{'':^7}┃{'':^7}┃\n"
-                    f"┃{'ID':^4}┃{'Status':^11}┣{'':━^4}┳{'':━^6}╋{'':━^7}┳{'':━^10}┳{'':━^6}┳{'':━^11}┫{'Iter':^7}┃{'Acc':^7}┃\n"
-                    f"┃{'':^4}┃{'':^11}┃{'ID':^4}┃{'TYPE':^6}┃{'lr':^7}┃{'momentum':^10}┃{'bs':^6}┃{'model':^11}┃{'':^7}┃{'':^7}┃\n"
-                    f"┣{'':━^4}╋{'':━^11}╋{'':━^4}╋{'':━^6}╋{'':━^7}╋{'':━^10}╋{'':━^6}╋{'':━^11}╋{'':━^7}╋{'':━^7}┫\n",
-                )
-
-                for i in self.all_trials.values():
-                    match i.worker_type:
-                        case WorkerType.CPU:
-                            worker_type = "CPU"
-                        case WorkerType.GPU:
-                            worker_type = "GPU"
-                        case _:
-                            worker_type = ""
-
-                    h = i.hyperparameter
-                    worker_id = ""
-                    if i.worker_id != -1:
-                        worker_id = i.worker_id
-                    f.write(
-                        f"┃{i.id:>4}┃{i.status:^11}┃{worker_id:>4}┃{worker_type:^6}┃{h.lr:>7.3f}┃{h.momentum:>10.3f}┃{h.batch_size:>6}┃{h.model_type:^11}┃{i.iteration:>7}┃{i.accuracy:>7.3f}┃\n",
-                    )
-                f.write(
-                    f"┗{'':━^4}┻{'':━^11}┻{'':━^4}┻{'':━^6}┻{'':━^7}┻{'':━^10}┻{'':━^6}┻{'':━^11}┻{'':━^7}┻{'':━^7}┛\n",
-                )
-
-        except Exception as e:
-            print(f"{e}")
+        self.target_generation = target_generation
