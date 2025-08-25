@@ -16,6 +16,7 @@ from .utils import (
     Checkpoint,
     DataloaderFactory,
     TrainStepFunction,
+    TrialStatus,
     WorkerState,
     WorkerType,
     timer,
@@ -250,8 +251,9 @@ class Worker:
                 continue
 
             ray.get(
-                self.trial_manager.transition_to_running.remote(  # type: ignore[reportGeneralTypeIssues]
+                self.trial_manager.transition_status.remote(  # type: ignore[reportGeneralTypeIssues]
                     trial_state.id,
+                    TrialStatus.RUNNING,
                     {
                         "worker_id": self.worker_state.id,
                         "worker_type": self.worker_state.worker_type,

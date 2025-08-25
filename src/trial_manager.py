@@ -15,7 +15,7 @@ from .utils import TrialStatus, WorkerType, colored_progress_bar
 
 ALLOWED_TRANSITION: dict[TrialStatus, set[TrialStatus]] = {
     TrialStatus.PENDING: {TrialStatus.WAITING},
-    TrialStatus.WAITING: {TrialStatus.RUNNING},
+    TrialStatus.WAITING: {TrialStatus.RUNNING, TrialStatus.PENDING},
     TrialStatus.RUNNING: {
         TrialStatus.WAITING,
         TrialStatus.PENDING,
@@ -73,7 +73,7 @@ class TrialManager:
             raise ValueError(msg)
         return trial
 
-    def set_status(self, trial_id: int, new_status: TrialStatus) -> None:
+    def _set_status(self, trial_id: int, new_status: TrialStatus) -> None:
         trial_state = self._get_trial_or_raise(trial_id)
         old_status = self.all_trials[trial_id].status
 
@@ -88,7 +88,7 @@ class TrialManager:
         trial_state.status = new_status
         self.logger.info("Trial %d 狀態從 %s -> %s", trial_id, old_status, new_status)
 
-    def transition_to_waiting(
+    def _transition_to_waiting(
         self,
         trial_id: int,
         partial: PartialTrialState | None = None,
@@ -98,11 +98,11 @@ class TrialManager:
         if partial:
             self.update_trial(trial_id, partial)
 
-        self.set_status(trial_id, TrialStatus.WAITING)
+        self._set_status(trial_id, TrialStatus.WAITING)
         self.pending_ids.discard(trial_id)
         self.waiting_ids.add(trial_id)
 
-    def transition_to_running(
+    def _transition_to_running(
         self,
         trial_id: int,
         partial: PartialTrialState | None = None,
@@ -112,11 +112,11 @@ class TrialManager:
         if partial:
             self.update_trial(trial_id, partial)
 
-        self.set_status(trial_id, TrialStatus.RUNNING)
+        self._set_status(trial_id, TrialStatus.RUNNING)
         self.waiting_ids.discard(trial_id)
         self.running_ids.add(trial_id)
 
-    def transition_to_pending(
+    def _transition_to_pending(
         self,
         trial_id: int,
         partial: PartialTrialState | None = None,
@@ -126,11 +126,11 @@ class TrialManager:
         if partial:
             self.update_trial(trial_id, partial)
 
-        self.set_status(trial_id, TrialStatus.PENDING)
+        self._set_status(trial_id, TrialStatus.PENDING)
         self.running_ids.discard(trial_id)
         self.pending_ids.add(trial_id)
 
-    def transition_to_completed(
+    def _transition_to_completed(
         self,
         trial_id: int,
         partial: PartialTrialState | None = None,
@@ -140,9 +140,28 @@ class TrialManager:
         if partial:
             self.update_trial(trial_id, partial)
 
-        self.set_status(trial_id, TrialStatus.TERMINATED)
+        self._set_status(trial_id, TrialStatus.TERMINATED)
         self.running_ids.discard(trial_id)
         self.completed_ids.add(trial_id)
+
+    def transition_status(
+        self,
+        trial_id: int,
+        status: TrialStatus,
+        partial: PartialTrialState | None = None,
+    ) -> None:
+        match status:
+            case TrialStatus.PENDING:
+                self._transition_to_pending(trial_id, partial)
+            case TrialStatus.WAITING:
+                self._transition_to_waiting(trial_id, partial)
+            case TrialStatus.RUNNING:
+                self._transition_to_running(trial_id, partial)
+            case TrialStatus.TERMINATED:
+                self._transition_to_completed(trial_id, partial)
+            case _:
+                msg = f"Unknown status: {status}"
+                raise ValueError(msg)
 
     def acquire_pending_trials(
         self,
@@ -155,7 +174,7 @@ class TrialManager:
         for trial_id in list(self.pending_ids)[:n]:
             trial = self.all_trials[trial_id]
             acquired.append(trial)
-            self.transition_to_waiting(
+            self._transition_to_waiting(
                 trial_id,
                 {"worker_id": worker_id, "worker_type": worker_type},
             )
@@ -185,7 +204,7 @@ class TrialManager:
             self.compute_target_generation(selected_trial.generation),
         )
 
-        self.transition_to_waiting(
+        self._transition_to_waiting(
             selected_trial.id,
             {"worker_id": worker_id, "worker_type": WorkerType.GPU},
         )
@@ -202,7 +221,7 @@ class TrialManager:
 
         selected_trial = self.get_nlargest_iteration_trials(k)[-1]  # type: ignore[reportGeneralTypeIssues]
         selected_trial.set_target_generation(2)
-        self.transition_to_waiting(
+        self._transition_to_waiting(
             selected_trial.id,
             {"worker_id": worker_id, "worker_type": WorkerType.CPU},
         )
@@ -320,7 +339,7 @@ class TrialManager:
 
             if self.history_best:
                 self.logger.info(
-                    "History best accuracy: %.2f, %s, iteration: %d",
+                    "History best accuracy: %f, %s, iteration: %d",
                     self.history_best.accuracy,
                     str(self.history_best.hyperparameter),
                     self.history_best.generation,

@@ -14,6 +14,7 @@ from .trial_state import PartialTrialState, TrialState
 from .utils import (
     DataloaderFactory,
     TrainStepFunction,
+    TrialStatus,
     WorkerType,
     get_head_node_address,
 )
@@ -116,9 +117,14 @@ class Tuner:
             partial["accuracy"],
         )
 
-        new_partial = partial | {"worker_id": -1, "worker_type": None}
+        partial["worker_id"] = -1
+        partial["worker_type"] = None
         ray.get(
-            self.trial_manager.transition_to_completed.remote(trial_id, new_partial),  # type: ignore[reportGeneralTypeIssues]
+            self.trial_manager.transition_status.remote(
+                trial_id,
+                TrialStatus.TERMINATED,
+                partial,
+            ),  # type: ignore[reportGeneralTypeIssues]
         )
         self.worker_manager.release_slots(worker_id, trial_id)
 
@@ -158,8 +164,9 @@ class Tuner:
         partial["worker_id"] = -1
         partial["worker_type"] = None
         ray.get(
-            self.trial_manager.transition_to_pending.remote(  # type: ignore[reportGeneralTypeIssues]
+            self.trial_manager.transition_status.remote(  # type: ignore[reportGeneralTypeIssues]
                 trial_id,
+                TrialStatus.PENDING,
                 partial,
             ),
         )
@@ -196,8 +203,9 @@ class Tuner:
         partial["worker_id"] = -1
         partial["worker_type"] = None
         ray.get(
-            self.trial_manager.transition_to_pending.remote(  # type: ignore[reportGeneralTypeIssues]
+            self.trial_manager.transition_status.remote(  # type: ignore[reportGeneralTypeIssues]
                 trial_id,
+                TrialStatus.PENDING,
                 partial | mutation_partial,
             ),
         )
