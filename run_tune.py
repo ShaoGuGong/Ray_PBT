@@ -171,7 +171,7 @@ def train_step(
     model: nn.Module,
     optimizer: optim.Optimizer,
     train_loader: DataLoader,
-    batch_size: int, #noqa: ARG001
+    batch_size: int,  # noqa: ARG001
     device: torch.device = DEFAULT_DEVICE,
 ) -> None:
     model.train()
