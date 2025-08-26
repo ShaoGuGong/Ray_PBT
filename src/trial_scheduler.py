@@ -9,7 +9,7 @@ from ray.actor import ActorHandle
 
 from src.config import CPU_TRIALS_LIMIT, GPU_TRIALS_LIMIT
 
-from .utils import WorkerType
+from .utils import TrialStatus, WorkerType
 from .worker_manager import WorkerManager
 
 
@@ -82,7 +82,7 @@ def stealing_strategy(
     logger.info("嘗試從 CPU Worker %d 偷取 Trial %d", worker.id, trial_id)
     worker.ref.stealing_trial.remote(trial_id)  # type: ignore[reportGeneralTypeIssues])
     worker_manager.release_slots(worker.id, trial_id)
-    ray.get(trial_manager.transition_to_pending.remote(trial_id))  # type: ignore[reportGeneralTypeIssues]
+    ray.get(trial_manager.transition_status.remote(trial_id, TrialStatus.PENDING))  # type: ignore[reportGeneralTypeIssues]
 
 
 def get_trial_scheduler_logger() -> logging.Logger:

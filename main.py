@@ -9,7 +9,7 @@ from torch import nn, optim
 from torch.utils.data import DataLoader
 from torchvision import models, transforms
 
-from src.config import DATASET_PATH, MAX_GENERATION
+from src.config import DATASET_PATH
 from src.trial_state import TrialState
 from src.tuner import Tuner
 from src.utils import Checkpoint, Hyperparameter, get_head_node_address, unzip_file
@@ -63,17 +63,6 @@ def cifar10_data_loader_factory(
         transform=test_transform,
     )
 
-    # np.random.seed(42)
-    # indices = np.random.permutation(len(test_dataset))
-    # test_size = len(test_dataset) // 2
-    # test_indices = indices[:test_size]
-    # valid_indices = indices[test_size:]
-    #
-    # valid_dataset = Subset(test_dataset, valid_indices.tolist())
-    # test_dataset = Subset(test_dataset, test_indices.tolist())
-
-    # print(f"{len(train_dataset)=}, {len(valid_dataset)=}, {len(test_dataset)=}")
-
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -87,19 +76,6 @@ def cifar10_data_loader_factory(
         num_workers=num_workers,
     )
 
-    # valid_loader = DataLoader(
-    #     valid_dataset,
-    #     batch_size=batch_size,
-    #     shuffle=True,
-    # )
-    #
-    # test_loader = DataLoader(
-    #     test_dataset,
-    #     batch_size=batch_size,
-    #     shuffle=False,
-    # )
-
-    # return train_loader, valid_loader, test_loader
     return train_loader, valid_loader, None
 
 
